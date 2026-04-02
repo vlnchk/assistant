@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: edujobs_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Прокидываем папку data для базы данных SQLite, чтобы она не удалялась при перезапуске
+      - ./data:/app/data
+      # Прокидываем JSON-ключ от Google API (если не добавишь его внутрь образа)
+      # Закомментируй или удали строку ниже, если файл копируется внутрь образа при сборке
+      # - ./ejs-admin-bot-a275ca626752.json:/app/ejs-admin-bot-a275ca626752.json:ro

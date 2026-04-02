@@ -1,0 +1,23 @@
+[Unit]
+Description=EduJobs Telegram Bot
+After=network.target
+
+[Service]
+User=YOUR_USER
+WorkingDirectory=/path/to/assistant/v1
+ExecStart=/path/to/assistant/v1/.venv/bin/python main.py
+EnvironmentFile=/path/to/assistant/v1/.env
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Безопасность
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/path/to/assistant/v1
+
+[Install]
+WantedBy=multi-user.target
