@@ -168,6 +168,14 @@ TOOL_FUNCTIONS = {
 }
 
 
+class ToolCallError(Exception):
+    """A tool could not be executed (unknown name or bad arguments).
+
+    Never shown to the client — the dispatcher converts it into a handover,
+    so the canonical replies.HANDOVER_CLIENT is sent instead of internals.
+    """
+
+
 class GeminiClient:
     def __init__(self):
         self.client = genai.Client(api_key=API_KEY)
@@ -231,15 +239,20 @@ class GeminiClient:
         return args
 
     async def _call_tool(self, name: str, args: dict) -> str:
-        """Run a tool function off the event loop (Sheets calls are blocking)."""
+        """Run a tool function off the event loop (Sheets calls are blocking).
+
+        Raises ToolCallError on unknown tool or bad arguments — the caller
+        turns it into a handover, so internal error text never reaches the
+        client.
+        """
         fn = TOOL_FUNCTIONS.get(name)
         if not fn:
-            return f"Ошибка: инструмент '{name}' не найден."
+            raise ToolCallError(f"инструмент '{name}' не найден")
         try:
             return await asyncio.to_thread(fn, **args)
         except TypeError as e:
             logger.error(f"[Tool] {name} получил неверные аргументы {args}: {e}")
-            return f"Ошибка вызова инструмента {name}: {e}"
+            raise ToolCallError(f"{name}: неверные аргументы") from e
 
     async def generate_response(
         self,
@@ -258,9 +271,11 @@ class GeminiClient:
         - Otherwise ``reply_text`` is the canonical client-facing text
           returned by the picked tool.
 
-        Raises ``asyncio.TimeoutError`` after one retry, or any other
-        Gemini exception — the handler catches and shows
-        ``replies.TECH_ERROR``.
+        Timeouts never raise: after one retry the method returns
+        ``(None, "LLM timeout")`` — i.e. a handover. Internal tool-call
+        failures (unknown tool, bad arguments) also become handovers.
+        Other Gemini exceptions propagate; the handler catches them and
+        shows ``replies.TECH_ERROR``.
         """
         config = self._config(user_context)
         history_contents = self._history_to_contents(history_messages)
@@ -319,7 +334,11 @@ class GeminiClient:
                 args = self._inject_real_telegram_id(raw_args, user_context)
                 logger.info(f"[Tool call] {tool_name}({args})")
 
-                result = await self._call_tool(tool_name, args)
+                try:
+                    result = await self._call_tool(tool_name, args)
+                except ToolCallError as e:
+                    logger.error(f"[Tool] {e} — уходим в handover")
+                    return None, f"внутренняя ошибка инструмента ({e})"
 
                 # Handover sentinel — short-circuit immediately.
                 if tool_name == "handover_to_admin" or (

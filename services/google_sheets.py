@@ -69,67 +69,6 @@ def _parse_month_number(month_str: str) -> Optional[int]:
     return None
 
 
-def _parse_date_month(date_str: str) -> Optional[int]:
-    """Extract the month number from a date string like '4/1/2026' or '04.01.2026'."""
-    date_str = str(date_str).strip()
-    for sep in ("/", ".", "-"):
-        parts = date_str.split(sep)
-        if len(parts) >= 2:
-            try:
-                return int(parts[0])
-            except ValueError:
-                continue
-    return None
-
-
-def _normalize_date_to_md(date_str: str) -> Optional[tuple]:
-    """
-    Parse various date formats into a (month, day) tuple for comparison.
-    Supports: '4/1/2026', '4/1', '01.04', '01.04.2026', '1 апреля', etc.
-    """
-    date_str = str(date_str).strip()
-
-    # Try M/D/YYYY or M/D format (Google Sheets format)
-    if "/" in date_str:
-        parts = date_str.split("/")
-        if len(parts) >= 2:
-            try:
-                return (int(parts[0]), int(parts[1]))
-            except ValueError:
-                pass
-
-    # Try D.M or D.M.YYYY format
-    if "." in date_str:
-        parts = date_str.split(".")
-        if len(parts) >= 2:
-            try:
-                return (int(parts[1]), int(parts[0]))
-            except ValueError:
-                pass
-
-    # Try D-M or D-M-YYYY format
-    if "-" in date_str:
-        parts = date_str.split("-")
-        if len(parts) >= 2:
-            try:
-                return (int(parts[1]), int(parts[0]))
-            except ValueError:
-                pass
-
-    # Try "D месяц" format (e.g. "1 апреля", "15 мая")
-    parts = date_str.split()
-    if len(parts) >= 2:
-        try:
-            day = int(parts[0])
-            month = _parse_month_number(parts[1])
-            if month:
-                return (month, day)
-        except ValueError:
-            pass
-
-    return None
-
-
 def _parse_date_full(date_str: str) -> Optional[datetime.date]:
     """
     Parse various date formats to ``datetime.date``.
@@ -338,41 +277,51 @@ class GoogleSheetsService:
                 status = str(_get_row_value(row, "Статус слота")).strip().lower()
                 sheet_dates[d] = status
 
-            free: list[datetime.date] = []
-            busy: list[datetime.date] = []
-            unknown: list[str] = []  # за окном или не парсится
+            free: set[datetime.date] = set()
+            busy: set[datetime.date] = set()
+            # Вне окна бронирования или не распарсилось — «пока недоступны».
+            unavailable: list[str] = []
 
             for raw in dates:
                 d = _parse_date_full(raw)
-                if d is None or d < today or d >= cap:
-                    unknown.append(str(raw).strip())
+                if d is None:
+                    label = str(raw).strip()
+                    if label and label not in unavailable:
+                        unavailable.append(label)
                     continue
-                status = sheet_dates.get(d)
-                if status == "свободен":
-                    free.append(d)
+                if d < today or d >= cap:
+                    label = f"{d.day} {MONTH_GENITIVE_RU[d.month]}"
+                    if label not in unavailable:
+                        unavailable.append(label)
+                    continue
+                if sheet_dates.get(d) == "свободен":
+                    free.add(d)
                 else:
                     # «забронирован», отсутствует в таблице — считаем занятым.
-                    busy.append(d)
+                    busy.add(d)
 
-            free.sort()
-            busy.sort()
+            free_str = _format_dates_ru(sorted(free))
+            busy_str = _format_dates_ru(sorted(busy))
+            unavailable_str = ", ".join(unavailable)
 
-            if free and not busy and not unknown:
-                return replies.SLOTS_CHECK_ALL_FREE.format(free=_format_dates_ru(free))
-            if busy and not free and not unknown:
-                return replies.SLOTS_CHECK_ALL_BUSY.format(busy=_format_dates_ru(busy))
-            if free and busy:
-                return replies.SLOTS_CHECK_FREE.format(
-                    free=_format_dates_ru(free),
-                    busy_line=replies.SLOTS_CHECK_BUSY.format(
-                        busy=_format_dates_ru(busy)
-                    ),
-                )
+            # Чистые случаи — цельная фраза.
+            if free and not busy and not unavailable:
+                return replies.SLOTS_CHECK_ALL_FREE.format(free=free_str)
+            if busy and not free and not unavailable:
+                return replies.SLOTS_CHECK_ALL_BUSY.format(busy=busy_str)
+
+            # Смешанный случай — построчная сводка, ничего не замалчиваем.
+            lines = []
             if free:
-                return replies.SLOTS_CHECK_ALL_FREE.format(free=_format_dates_ru(free))
+                lines.append(replies.SLOTS_CHECK_FREE_LINE.format(free=free_str))
             if busy:
-                return replies.SLOTS_CHECK_ALL_BUSY.format(busy=_format_dates_ru(busy))
-            # Только unknown — даты за окном бронирования.
+                lines.append(replies.SLOTS_CHECK_BUSY_LINE.format(busy=busy_str))
+            if unavailable:
+                lines.append(
+                    replies.SLOTS_CHECK_UNAVAILABLE_LINE.format(dates=unavailable_str)
+                )
+            if lines:
+                return "\n".join(lines)
             return replies.SLOTS_EMPTY
         except Exception as e:
             logger.error(f"[Sheets] check_dates_availability failed: {e}")
@@ -390,11 +339,28 @@ class GoogleSheetsService:
     ) -> str:
         """
         Books a free slot for a specific date.
+
+        The booking window (today .. current month + 2) is enforced here,
+        not only in get_free_slots — the client may name a date directly,
+        bypassing the slot list. Matching is by full date (with year), so a
+        stale past-year row in the sheet can never be booked.
         """
         if not self.spreadsheet:
             self._connect()
         if not self.spreadsheet:
             return replies.SLOTS_CONNECTION_ERROR
+
+        today = datetime.date.today()
+        cap = _cap_date(today)
+        requested = _parse_date_full(date)
+        if requested is None:
+            return replies.BOOK_NOT_FOUND.format(date=str(date).strip())
+        if requested < today or requested >= cap:
+            last_allowed = cap - datetime.timedelta(days=1)
+            return replies.BOOK_OUT_OF_WINDOW.format(
+                month=MONTH_GENITIVE_RU[last_allowed.month]
+            )
+        requested_label = f"{requested.day} {MONTH_GENITIVE_RU[requested.month]}"
 
         try:
             sheet = self.spreadsheet.worksheet("Календарь (Слоты)")
@@ -415,13 +381,11 @@ class GoogleSheetsService:
             if publish_time:
                 _ensure_column("Время публикации")
 
-            requested = _normalize_date_to_md(date)
             for i, row in enumerate(records):
                 status = str(_get_row_value(row, "Статус слота")).strip().lower()
                 row_date = str(_get_row_value(row, "Дата")).strip()
 
-                row_md = _normalize_date_to_md(row_date)
-                if status == "свободен" and requested and row_md == requested:
+                if status == "свободен" and _parse_date_full(row_date) == requested:
                     row_index = i + 2  # +2: row 1 is header, enumerate is 0-indexed
 
                     updates = []
@@ -451,9 +415,9 @@ class GoogleSheetsService:
                             error="не найдены нужные колонки в таблице"
                         )
                     sheet.batch_update(updates)
-                    return replies.BOOK_SUCCESS.format(date=date)
+                    return replies.BOOK_SUCCESS.format(date=requested_label)
 
-            return replies.BOOK_NOT_FOUND.format(date=date)
+            return replies.BOOK_NOT_FOUND.format(date=requested_label)
         except Exception as e:
             logger.error(f"[Sheets] book_slot failed: {e}")
             return replies.BOOK_ERROR.format(error=str(e))

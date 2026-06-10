@@ -174,8 +174,12 @@ def book_slot(
     grey schemes, dubious supplements, info-gypsies) — DO NOT call this
     tool; call handover_to_admin instead.
 
+    The booking window (current month + 2 next) is enforced server-side:
+    out-of-window dates get a canonical refusal reply automatically.
+
     Args:
-        date: Exact date string as returned by get_free_slots (e.g. "5/5/2026").
+        date: Date as the client named it or as shown by get_free_slots
+            (e.g. "5 мая", "26.08"). Always include the month, never the year.
         client: Client name or company.
         ad_topic: What the client plans to advertise. REQUIRED.
         telegram_id: Always take from the ТЕКУЩИЙ ПОЛЬЗОВАТЕЛЬ section.

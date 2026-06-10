@@ -98,6 +98,24 @@ async def _post_client_card(
         logger.warning(f"Не удалось отправить карточку клиента в тему {topic_id}: {e}")
 
 
+async def _mirror_to_topic(bot: Bot, admin_topic: AdminTopic | None, text: str) -> None:
+    """Duplicate a bot-side reply into the client's admin topic (best effort —
+    managers just lose visibility on failure, the client flow is unaffected)."""
+    if not (admin_topic and SUPERGROUP_CHAT_ID):
+        return
+    try:
+        await bot.send_message(
+            chat_id=SUPERGROUP_CHAT_ID,
+            text=text,
+            message_thread_id=admin_topic.topic_id,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(
+            f"Не удалось продублировать сообщение в тему {admin_topic.topic_id}: {e}"
+        )
+
+
 async def get_or_create_representative(
     session, telegram_id: int, username: str, first_name: str, bot: Bot
 ):
@@ -284,44 +302,45 @@ async def user_private_message(message: Message, bot: Bot):
             except Exception as e:
                 logger.warning(f"Не удалось переслать сообщение в тему админа: {e}")
 
-            if not user_text:
-                # Pure media — acknowledge and escalate.
-                ack_text = replies.MEDIA_ACK
-                await message.answer(ack_text)
-                session.add(
-                    MessageHistory(
-                        telegram_id=rep.telegram_id, role="assistant", content=ack_text
-                    )
-                )
+        if not user_text:
+            # Чистое медиа (файл/фото без текста) — поведение зависит от
+            # статуса диалога, как и для текста.
+            status = admin_topic.status if admin_topic else "active"
 
-                if admin_topic:
-                    admin_topic.status = "waiting_human"
-                await session.commit()
-
-                if admin_topic:
-                    try:
-                        await bot.send_message(
-                            chat_id=SUPERGROUP_CHAT_ID,
-                            text=replies.ADMIN_BOT_REPLY.format(
-                                text=html.escape(ack_text)
-                            ),
-                            message_thread_id=admin_topic.topic_id,
-                            parse_mode="HTML",
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Не удалось продублировать ответ бота в тему: {e}"
-                        )
-
-                await _notify_escalation(
-                    bot,
-                    rep,
-                    "Был отправлен файл (медиа) без текста",
-                    admin_topic,
-                )
+            if status == "human_mode":
+                # Менеджер ведёт диалог: файл уже переслан в тему, бот молчит
+                # и статус не трогает.
                 return
 
-        if not user_text:
+            if status == "waiting_human":
+                # Эскалация уже была — напоминаем клиенту, без повторного алерта.
+                await message.answer(replies.WAITING_HUMAN)
+                await _mirror_to_topic(bot, admin_topic, replies.ADMIN_BOT_WAITING)
+                return
+
+            # active (или тема ещё не создана) — подтверждаем и эскалируем.
+            ack_text = replies.MEDIA_ACK
+            await message.answer(ack_text)
+            session.add(
+                MessageHistory(
+                    telegram_id=rep.telegram_id, role="assistant", content=ack_text
+                )
+            )
+            if admin_topic:
+                admin_topic.status = "waiting_human"
+            await session.commit()
+
+            await _mirror_to_topic(
+                bot,
+                admin_topic,
+                replies.ADMIN_BOT_REPLY.format(text=html.escape(ack_text)),
+            )
+            await _notify_escalation(
+                bot,
+                rep,
+                "Был отправлен файл (медиа) без текста",
+                admin_topic,
+            )
             return
 
         # Telegram-команды /start и /help — детерминированное приветствие
@@ -338,18 +357,11 @@ async def user_private_message(message: Message, bot: Bot):
             )
             await session.commit()
             await message.answer(greeting)
-            if admin_topic and SUPERGROUP_CHAT_ID:
-                try:
-                    await bot.send_message(
-                        chat_id=SUPERGROUP_CHAT_ID,
-                        text=replies.ADMIN_BOT_REPLY.format(text=html.escape(greeting)),
-                        message_thread_id=admin_topic.topic_id,
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Не удалось продублировать приветствие в тему: {e}"
-                    )
+            await _mirror_to_topic(
+                bot,
+                admin_topic,
+                replies.ADMIN_BOT_REPLY.format(text=html.escape(greeting)),
+            )
             return
 
         # Re-read admin_topic (status may have changed via /close path)
@@ -358,16 +370,7 @@ async def user_private_message(message: Message, bot: Bot):
         )
         if admin_topic and admin_topic.status == "waiting_human":
             await message.answer(replies.WAITING_HUMAN)
-            if SUPERGROUP_CHAT_ID:
-                try:
-                    await bot.send_message(
-                        chat_id=SUPERGROUP_CHAT_ID,
-                        text=replies.ADMIN_BOT_WAITING,
-                        message_thread_id=admin_topic.topic_id,
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.warning(f"Не удалось продублировать ожидание в тему: {e}")
+            await _mirror_to_topic(bot, admin_topic, replies.ADMIN_BOT_WAITING)
             return
 
         if admin_topic and admin_topic.status == "human_mode":
@@ -425,18 +428,11 @@ async def user_private_message(message: Message, bot: Bot):
             except Exception as e:
                 logger.error(f"Ошибка LLM для пользователя {rep.telegram_id}: {e}")
                 await message.answer(replies.TECH_ERROR)
-                if admin_topic and SUPERGROUP_CHAT_ID:
-                    try:
-                        await bot.send_message(
-                            chat_id=SUPERGROUP_CHAT_ID,
-                            text=replies.ADMIN_LLM_ERROR.format(error=html.escape(str(e))),
-                            message_thread_id=admin_topic.topic_id,
-                            parse_mode="HTML",
-                        )
-                    except Exception as inner:
-                        logger.warning(
-                            f"Не удалось продублировать ошибку LLM в тему: {inner}"
-                        )
+                await _mirror_to_topic(
+                    bot,
+                    admin_topic,
+                    replies.ADMIN_LLM_ERROR.format(error=html.escape(str(e))),
+                )
                 return
 
             if handover_reason is not None:
@@ -455,19 +451,11 @@ async def user_private_message(message: Message, bot: Bot):
                 await session.commit()
 
                 await message.answer(final_reply)
-                if admin_topic and SUPERGROUP_CHAT_ID:
-                    try:
-                        await bot.send_message(
-                            chat_id=SUPERGROUP_CHAT_ID,
-                            text=replies.ADMIN_BOT_REPLY.format(
-                                text=html.escape(final_reply)
-                            ),
-                            message_thread_id=admin_topic.topic_id,
-                            parse_mode="HTML",
-                        )
-                    except Exception as e:
-                        logger.warning(f"Не удалось продублировать handover в тему: {e}")
-
+                await _mirror_to_topic(
+                    bot,
+                    admin_topic,
+                    replies.ADMIN_BOT_REPLY.format(text=html.escape(final_reply)),
+                )
                 await _notify_escalation(bot, rep, handover_reason, admin_topic)
                 return
 
@@ -487,18 +475,11 @@ async def user_private_message(message: Message, bot: Bot):
             await session.commit()
 
             await message.answer(reply_text)
-            if admin_topic and SUPERGROUP_CHAT_ID:
-                try:
-                    await bot.send_message(
-                        chat_id=SUPERGROUP_CHAT_ID,
-                        text=replies.ADMIN_BOT_REPLY.format(
-                            text=html.escape(reply_text)
-                        ),
-                        message_thread_id=admin_topic.topic_id,
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.warning(f"Не удалось продублировать ответ бота в тему: {e}")
+            await _mirror_to_topic(
+                bot,
+                admin_topic,
+                replies.ADMIN_BOT_REPLY.format(text=html.escape(reply_text)),
+            )
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
