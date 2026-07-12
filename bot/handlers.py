@@ -1,6 +1,7 @@
 import asyncio
 import html
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -244,6 +245,70 @@ async def _notify_escalation(
         logger.info(f"[Эскалация] Уведомление отправлено в тему {esc_topic_id}")
     except Exception as e:
         logger.error(f"[Эскалация] Не удалось отправить уведомление: {e}")
+
+
+GRATITUDE_PATTERN = re.compile(r"^\s*(спасибо|спс|благодарю|огромное спасибо|спасибо большое)\s*[!\.\)]*$", re.IGNORECASE)
+
+@router.message(F.text.regexp(GRATITUDE_PATTERN), F.chat.type == "private")
+async def handle_gratitude(message: Message, bot: Bot):
+    if is_rate_limited(message.from_user.id):
+        await message.answer(replies.RATE_LIMITED)
+        return
+
+    async with async_session_maker() as session:
+        rep = await get_or_create_representative(
+            session,
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
+            bot,
+        )
+
+        user_text = message.text
+
+        # Save user message
+        session.add(
+            MessageHistory(
+                telegram_id=rep.telegram_id,
+                role="user",
+                content=user_text,
+            )
+        )
+        await session.commit()
+
+        # Send gratitude reply
+        await message.answer(replies.GRATITUDE)
+
+        # Save bot response
+        session.add(
+            MessageHistory(
+                telegram_id=rep.telegram_id,
+                role="model",
+                content=replies.GRATITUDE,
+            )
+        )
+        await session.commit()
+
+        # Forward to admin topic
+        admin_topic = await session.scalar(
+            select(AdminTopic).where(AdminTopic.telegram_id == rep.telegram_id)
+        )
+        if admin_topic:
+            try:
+                await bot.send_message(
+                    chat_id=SUPERGROUP_CHAT_ID,
+                    text=replies.ADMIN_CLIENT_TEXT.format(text=html.escape(user_text)),
+                    message_thread_id=admin_topic.topic_id,
+                    parse_mode="HTML",
+                )
+                await bot.send_message(
+                    chat_id=SUPERGROUP_CHAT_ID,
+                    text=replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GRATITUDE)),
+                    message_thread_id=admin_topic.topic_id,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.error(f"Failed to forward gratitude to admin topic: {e}")
 
 
 @router.message(CommandStart(), F.chat.type == "private")
