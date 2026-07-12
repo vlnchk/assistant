@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 
 from aiogram import Bot, F, Router
+from aiogram.filters import CommandStart
 from aiogram.types import Message
 from sqlalchemy.future import select
 
@@ -243,6 +244,66 @@ async def _notify_escalation(
         logger.info(f"[Эскалация] Уведомление отправлено в тему {esc_topic_id}")
     except Exception as e:
         logger.error(f"[Эскалация] Не удалось отправить уведомление: {e}")
+
+
+@router.message(CommandStart(), F.chat.type == "private")
+async def handle_start_command(message: Message, bot: Bot):
+    if is_rate_limited(message.from_user.id):
+        await message.answer(replies.RATE_LIMITED)
+        return
+
+    async with async_session_maker() as session:
+        rep = await get_or_create_representative(
+            session,
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
+            bot,
+        )
+
+        # Save user message
+        session.add(
+            MessageHistory(
+                telegram_id=rep.telegram_id,
+                role="user",
+                content="/start",
+            )
+        )
+        await session.commit()
+
+        # Send greeting
+        await message.answer(replies.GREETING_TEXT)
+
+        # Save bot response
+        session.add(
+            MessageHistory(
+                telegram_id=rep.telegram_id,
+                role="model",
+                content=replies.GREETING_TEXT,
+            )
+        )
+        await session.commit()
+
+        # Forward to admin topic
+        admin_topic = await session.scalar(
+            select(AdminTopic).where(AdminTopic.telegram_id == rep.telegram_id)
+        )
+        if admin_topic:
+            try:
+                await bot.send_message(
+                    chat_id=SUPERGROUP_CHAT_ID,
+                    text=replies.ADMIN_CLIENT_TEXT.format(text="/start"),
+                    message_thread_id=admin_topic.topic_id,
+                    parse_mode="HTML",
+                )
+                await bot.send_message(
+                    chat_id=SUPERGROUP_CHAT_ID,
+                    text=replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GREETING_TEXT)),
+                    message_thread_id=admin_topic.topic_id,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.error(f"Failed to forward /start to admin topic: {e}")
 
 
 @router.message(F.chat.type == "private")
