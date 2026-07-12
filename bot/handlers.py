@@ -272,14 +272,14 @@ async def handle_start_command(message: Message, bot: Bot):
         await session.commit()
 
         # Send greeting
-        await message.answer(replies.GREETING_TEXT)
+        await message.answer(replies.GREETING)
 
         # Save bot response
         session.add(
             MessageHistory(
                 telegram_id=rep.telegram_id,
                 role="model",
-                content=replies.GREETING_TEXT,
+                content=replies.GREETING,
             )
         )
         await session.commit()
@@ -298,7 +298,7 @@ async def handle_start_command(message: Message, bot: Bot):
                 )
                 await bot.send_message(
                     chat_id=SUPERGROUP_CHAT_ID,
-                    text=replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GREETING_TEXT)),
+                    text=replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GREETING)),
                     message_thread_id=admin_topic.topic_id,
                     parse_mode="HTML",
                 )
