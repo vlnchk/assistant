@@ -1,7 +1,21 @@
-.env
-*.json
-*.sqlite3
+# Системные и IDE файлы
+.DS_Store
+.vscode/
+.idea/
+
+# Инструменты AI / Агенты
+.claude/
+
+# Python / Окружение
 .venv/
 __pycache__/
+*.py[cod]
+
+# Логи и БД
 *.log
 *.log.*
+*.sqlite3
+
+# Конфиги и секреты
+.env
+*.json
