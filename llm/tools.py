@@ -63,6 +63,17 @@ def send_greeting() -> str:
     return replies.GREETING
 
 
+def reply_gratitude() -> str:
+    """
+    Reply to a standalone expression of thanks or a polite closing.
+
+    Use only when the whole message is gratitude. If the client thanks us and
+    also asks a real question or requests an action, handle that request with
+    the corresponding business tool instead.
+    """
+    return replies.GRATITUDE
+
+
 def reply_bot_nature() -> str:
     """
     Answer questions about whether the bot is a human, an AI, has feelings,
@@ -92,8 +103,11 @@ def faq_free_posting() -> str:
     to the submission form. Use when the client wants to publish a vacancy
     via the standard form, or asks only "how do I post a vacancy?". For price,
     own-format or free-vs-paid questions use answer_information with
-    vacancy_options instead. Never use for a program, course, event, school
-    or educational project merely because participation is free.
+    vacancy_options instead. A course, school, program or project mentioned as
+    the employer/product does not change an explicit vacancy into promotion
+    (e.g. "vacancy for a course teacher" is still a vacancy). Never use this
+    tool for an announcement promoting the program/course itself merely because
+    participation is free.
     """
     return replies.FAQ_FREE_POSTING
 
@@ -106,7 +120,9 @@ def faq_paid_post() -> str:
     vacancy where the client compares free and custom-format placement, use
     answer_information with vacancy_options. Announcements about programs,
     courses, events and educational projects are promotional posts even when
-    they are free for students or include an internship.
+    they are free for students or include an internship. Exception: an explicit
+    vacancy, job title or search for an employee remains a vacancy even if that
+    employee will work on a course, school or educational project.
     """
     return replies.FAQ_PAID_POST
 
@@ -479,6 +495,7 @@ def handover_to_admin(reason: str) -> str:
 # round-trip is needed because the text is already canonical.
 TERMINAL_TOOLS = {
     "send_greeting",
+    "reply_gratitude",
     "reply_bot_nature",
     "reply_offtopic",
     "faq_free_posting",
@@ -499,6 +516,7 @@ TERMINAL_TOOLS = {
 
 bot_tools = [
     send_greeting,
+    reply_gratitude,
     reply_bot_nature,
     reply_offtopic,
     faq_free_posting,

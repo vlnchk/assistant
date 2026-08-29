@@ -1,36 +1,41 @@
+import json
 import unittest
+from pathlib import Path
 
-from bot.handlers import is_non_vacancy_promotion
+from bot import handlers
+from llm.gemini_client import _build_system_prompt
 
 
-class PromotionRoutingTests(unittest.TestCase):
-    def test_program_announcements_are_paid_promotion(self):
-        promotional_requests = [
-            (
-                "Могли ли бы вы разместить информацию о наборе на программу "
-                "в вашем паблике? Это бесплатно для студентов, участники "
-                "получат стажировку."
-            ),
-            "Хотим опубликовать анонс бесплатного курса для студентов",
-            "Можно разместить в канале информацию о благотворительном проекте?",
-            "Сколько стоит рекламный пост про наш вебинар?",
-        ]
+class SemanticRoutingConfigurationTests(unittest.TestCase):
+    def test_semantic_regex_shortcuts_are_removed(self):
+        removed_names = {
+            "GRATITUDE_PATTERN",
+            "PLACEMENT_REQUEST_PATTERN",
+            "PROMOTIONAL_CONTENT_PATTERN",
+            "VACANCY_SIGNAL_PATTERN",
+            "is_gratitude_only",
+            "is_non_vacancy_promotion",
+        }
+        self.assertTrue(removed_names.isdisjoint(vars(handlers)))
 
-        for text in promotional_requests:
-            with self.subTest(text=text):
-                self.assertTrue(is_non_vacancy_promotion(text))
+    def test_model_prompt_keeps_vacancy_and_promotion_rule(self):
+        prompt = _build_system_prompt(None)
+        self.assertIn("программах, курсах", prompt)
+        self.assertIn("настоящей", prompt)
+        self.assertNotIn("delegate_to_flash", prompt)
 
-    def test_real_vacancies_are_not_intercepted_as_promotion(self):
-        vacancy_requests = [
-            "Хочу разместить вакансию преподавателя курса",
-            "Опубликуйте вакансию менеджера образовательного проекта",
-            "Ищем преподавателя на курс, зарплата 100 000 рублей",
-            "Как разместить вакансию?",
-        ]
-
-        for text in vacancy_requests:
-            with self.subTest(text=text):
-                self.assertFalse(is_non_vacancy_promotion(text))
+    def test_eval_dataset_covers_both_routes(self):
+        fixture = Path(__file__).parent / "fixtures" / "dialog_cases.jsonl"
+        expected = {}
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            case = json.loads(line)
+            if "_meta" in case:
+                continue
+            expected[case["id"]] = case["turns"][0].get("expected_tool")
+        self.assertEqual(expected["paid_program_promotion"], "faq_paid_post")
+        self.assertEqual(expected["real_vacancy"], "faq_free_posting")
 
 
 if __name__ == "__main__":

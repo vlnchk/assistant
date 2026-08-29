@@ -1,54 +1,35 @@
-"""
-Gemini dispatcher client (new google-genai SDK).
+"""Single-model Gemini routing through Flash-Lite.
 
-The LLM acts as a router: on every user turn it picks exactly one tool
-from llm.tools.bot_tools. The tool's return value IS the text shown to
-the client (no second LLM round-trip), unless the tool is
-handover_to_admin, which returns a __HANDOVER__ sentinel that the
-handler converts into replies.HANDOVER_CLIENT.
-
-Security: the real telegram_id from user_context is forcibly injected
-into any tool call that takes a telegram_id argument, BEFORE the tool
-runs. The LLM cannot pull someone else's data even if prompt-injected.
+This module only obtains a tool decision. Validation, trusted-context
+injection and execution are separate so a side-effecting tool runs at most once.
 """
 
 import asyncio
 import datetime
-import json
 import os
-from typing import Optional
+import time
+from typing import Any, Optional
 
 from google import genai
 from google.genai import types
 
-from llm.tools import (
-    bot_tools,
-    TERMINAL_TOOLS,
-    send_greeting,
-    reply_bot_nature,
-    reply_offtopic,
-    faq_free_posting,
-    faq_paid_post,
-    faq_stats,
-    faq_ord,
-    faq_docs,
-    answer_information,
-    ask_ad_topic,
-    get_free_slots,
-    check_dates_availability,
-    book_slot,
-    get_client_bookings,
-    create_document_task,
-    request_publication_support,
-    request_mutual_pr_support,
-    handover_to_admin,
+from assistant.models import ModelUsage, RouteDecision
+from llm.tools import bot_tools
+from llm.tool_executor import (
+    ProductionToolExecutor,
+    TOOL_FUNCTIONS,
+    ToolCallError,
+    inject_server_context,
 )
 from logger import logger
 
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "10"))
+MODEL_NAME = os.getenv(
+    "GEMINI_MODEL",
+    os.getenv("GEMINI_LITE_MODEL", "gemini-3.5-flash-lite"),
+)
+GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "10"))
 
 
 SYSTEM_PROMPT_TEMPLATE = """Сегодня: {current_date}.
@@ -72,7 +53,7 @@ answer_information и перечисли ВСЕ нужные темы. Напр�
 одновременно вызвать дополнительные tools.
 
 ЕСЛИ НИ ОДИН ИНСТРУМЕНТ НЕ ПОДХОДИТ или ситуация нестандартная — вызови инструмент handover_to_admin.
-Если до LLM дошла чистая благодарность или прощание — вызови reply_offtopic;
+Если сообщение является только благодарностью — вызови reply_gratitude;
 но благодарность перед реальным вопросом не должна скрывать вопрос.
 
 --- ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА ---
@@ -87,9 +68,10 @@ answer_information и перечисли ВСЕ нужные темы. Напр�
 вопросы не по теме канала:
   → reply_offtopic
 
-Чистые благодарности перехватываются кодом до LLM. Если благодарность является
-только вводной частью вопроса («Спасибо, а какие даты свободны?»), игнорируй
-вводную благодарность и обработай сам вопрос.
+Чистая благодарность («спасибо», «благодарю», «от души спасибо»):
+  → reply_gratitude
+Если благодарность является только вводной частью вопроса («Спасибо, а какие
+даты свободны?»), игнорируй вводную благодарность и обработай сам вопрос.
 
 Вопросы про размещение вакансии через стандартную форму:
   → faq_free_posting
@@ -102,6 +84,13 @@ answer_information и перечисли ВСЕ нужные темы. Напр�
     - «Опубликуйте, пожалуйста, вакансию»
   НИКОГДА не сочиняй текст про размещение вакансии или URL формы —
   ВСЕГДА вызывай faq_free_posting, в нём уже есть нужная ссылка.
+  ЯВНЫЙ СИГНАЛ ВАКАНСИИ ИМЕЕТ ПРИОРИТЕТ над словами про продукт или отрасль.
+  Если клиент прямо пишет «вакансия», называет должность, зарплату или ищет
+  сотрудника/специалиста/преподавателя, это вакансия. Слова «курс», «школа»,
+  «программа» или «проект» могут описывать место работы и сами по себе не
+  превращают вакансию в рекламу. Например:
+    - «Хочу разместить вакансию преподавателя курса» → faq_free_posting
+    - «Ищем менеджера образовательного проекта» → faq_free_posting
   ИСКЛЮЧЕНИЕ: если клиент спрашивает цену размещения вакансии, разницу
   бесплатного и платного вариантов, свой формат, готовый текст, отсутствие
   прямых контактов или изображение — вызывай
@@ -112,6 +101,8 @@ answer_information и перечисли ВСЕ нужные темы. Напр�
   → faq_paid_post
   Объявления о программах, курсах, школах, мероприятиях, вебинарах,
   интенсивах и наборах на обучение — это рекламные посты, а НЕ вакансии.
+  Но если прямо указана вакансия, должность или поиск сотрудника, применяй
+  правило вакансии выше, даже когда человек будет работать над курсом.
   Фразы «бесплатно для студентов/участников», «благотворительный проект»
   или обещание стажировки описывают продукт и НЕ делают размещение бесплатным.
   Если просят разместить информацию о таком проекте в канале или паблике,
@@ -205,7 +196,9 @@ reply_offtopic.
 """
 
 
-def _build_system_prompt(user_context: dict | None) -> str:
+def _build_system_prompt(
+    user_context: dict[str, Any] | None,
+) -> str:
     current_date_str = datetime.datetime.now().strftime("%d.%m.%Y")
     prompt = SYSTEM_PROMPT_TEMPLATE.format(current_date=current_date_str)
     if user_context:
@@ -218,44 +211,32 @@ def _build_system_prompt(user_context: dict | None) -> str:
     return prompt
 
 
-# Manual function dispatch — we never let the new SDK auto-call tools,
-# because we need to inject the real telegram_id before each call.
-TOOL_FUNCTIONS = {
-    "send_greeting": send_greeting,
-    "reply_bot_nature": reply_bot_nature,
-    "reply_offtopic": reply_offtopic,
-    "faq_free_posting": faq_free_posting,
-    "faq_paid_post": faq_paid_post,
-    "faq_stats": faq_stats,
-    "faq_ord": faq_ord,
-    "faq_docs": faq_docs,
-    "answer_information": answer_information,
-    "ask_ad_topic": ask_ad_topic,
-    "get_free_slots": get_free_slots,
-    "check_dates_availability": check_dates_availability,
-    "book_slot": book_slot,
-    "get_client_bookings": get_client_bookings,
-    "create_document_task": create_document_task,
-    "request_publication_support": request_publication_support,
-    "request_mutual_pr_support": request_mutual_pr_support,
-    "handover_to_admin": handover_to_admin,
-}
-
-
-class ToolCallError(Exception):
-    """A tool could not be executed (unknown name or bad arguments).
-
-    Never shown to the client — the dispatcher converts it into a handover,
-    so the canonical replies.HANDOVER_CLIENT is sent instead of internals.
-    """
+def _metadata_value(metadata: Any, snake_name: str, camel_name: str) -> int | None:
+    if metadata is None:
+        return None
+    value = getattr(metadata, snake_name, None)
+    if value is None:
+        value = getattr(metadata, camel_name, None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class GeminiClient:
-    def __init__(self):
-        self.client = genai.Client(api_key=API_KEY)
-        self.model_name = DEFAULT_MODEL
+    """Gemini tool router. Tool execution lives in ``tool_executor``."""
 
-    def _config(self, user_context: dict | None) -> types.GenerateContentConfig:
+    def __init__(self):
+        # A lazy/empty client keeps unit tests and offline imports independent
+        # from secrets. Real model calls still fail clearly without an API key.
+        self.client = genai.Client(api_key=API_KEY) if API_KEY else None
+        self.model_name = MODEL_NAME
+        self.executor = ProductionToolExecutor()
+
+    def _config(
+        self,
+        user_context: dict[str, Any] | None,
+    ) -> types.GenerateContentConfig:
         return types.GenerateContentConfig(
             system_instruction=_build_system_prompt(user_context),
             tools=bot_tools,
@@ -272,24 +253,39 @@ class GeminiClient:
         )
 
     @staticmethod
-    def _history_to_contents(history: list[dict]) -> list[types.Content]:
-        """Convert our internal history format ({"role": ..., "parts": [str]})
-        into google-genai Content objects."""
-        contents = []
+    def _history_to_contents(history: list[dict[str, Any]]) -> list[types.Content]:
+        """Convert provider-neutral stored history to Gemini contents."""
+        normalized: list[tuple[str, str]] = []
         for item in history:
-            role = item["role"]  # "user" or "model"
-            text = item["parts"][0] if item.get("parts") else ""
-            contents.append(
-                types.Content(role=role, parts=[types.Part.from_text(text=text)])
-            )
-        return contents
+            source_role = str(item.get("role") or "user")
+            if "content" in item:
+                text = str(item.get("content") or "")
+            else:
+                parts = item.get("parts") or []
+                text = str(parts[0]) if parts else ""
+
+            if source_role in {"assistant", "model"}:
+                role = "model"
+            else:
+                role = "user"
+                if source_role == "admin":
+                    text = f"[Менеджер]: {text}"
+
+            if normalized and normalized[-1][0] == role:
+                previous_role, previous_text = normalized[-1]
+                normalized[-1] = (previous_role, f"{previous_text}\n{text}")
+            else:
+                normalized.append((role, text))
+
+        return [
+            types.Content(role=role, parts=[types.Part.from_text(text=text)])
+            for role, text in normalized
+        ]
 
     @staticmethod
-    def _extract_function_calls(response) -> list:
-        """Pull function_call parts from a response, robust to API shape."""
-        calls = []
-        # New SDK exposes a helper attribute, but it's sometimes missing —
-        # walk the candidate parts manually as a fallback.
+    def _extract_function_calls(response: Any) -> list[Any]:
+        """Pull function-call parts from a response, robust to API shape."""
+        calls: list[Any] = []
         if getattr(response, "function_calls", None):
             return list(response.function_calls)
         for candidate in getattr(response, "candidates", []) or []:
@@ -297,235 +293,188 @@ class GeminiClient:
             if not content:
                 continue
             for part in getattr(content, "parts", []) or []:
-                fc = getattr(part, "function_call", None)
-                if fc and getattr(fc, "name", None):
-                    calls.append(fc)
+                fn_call = getattr(part, "function_call", None)
+                if fn_call and getattr(fn_call, "name", None):
+                    calls.append(fn_call)
         return calls
+
+    @staticmethod
+    def _usage(response: Any) -> ModelUsage:
+        metadata = getattr(response, "usage_metadata", None)
+        return ModelUsage(
+            prompt_tokens=_metadata_value(
+                metadata, "prompt_token_count", "promptTokenCount"
+            ),
+            candidate_tokens=_metadata_value(
+                metadata, "candidates_token_count", "candidatesTokenCount"
+            ),
+            thoughts_tokens=_metadata_value(
+                metadata, "thoughts_token_count", "thoughtsTokenCount"
+            ),
+            total_tokens=_metadata_value(
+                metadata, "total_token_count", "totalTokenCount"
+            ),
+        )
 
     def _inject_server_context(
         self,
         tool_name: str,
-        args: dict,
-        user_context: dict | None,
-    ) -> dict:
-        """Inject identity and admin links from trusted server-side context."""
-        args = dict(args)
-        if not user_context:
+        args: dict[str, Any],
+        user_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Backward-compatible facade for tests and external callers."""
+        return inject_server_context(tool_name, args, user_context)
+
+    def _inject_real_telegram_id(
+        self,
+        args: dict[str, Any],
+        user_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Backward-compatible helper retained for older callers."""
+        if "telegram_id" not in args:
             return args
+        return inject_server_context("get_client_bookings", args, user_context)
 
-        identity_tools = {"book_slot", "get_client_bookings", "create_document_task"}
-        real_tid = str(user_context.get("telegram_id") or "")
-        if tool_name in identity_tools and real_tid:
-            supplied_tid = args.get("telegram_id")
-            if supplied_tid is not None and str(supplied_tid) != real_tid:
-                logger.warning(
-                    f"[Security] LLM передал telegram_id={supplied_tid}, "
-                    f"заменён на {real_tid}"
-                )
-            args["telegram_id"] = real_tid
-
-        if tool_name in {"book_slot", "create_document_task"}:
-            args["link"] = str(user_context.get("dialog_link") or "")
-
-        if tool_name == "create_document_task":
-            username = user_context.get("username")
-            first_name = user_context.get("first_name")
-            args["contact"] = f"@{username}" if username else str(first_name or "")
-
-        return args
-
-    def _inject_real_telegram_id(self, args: dict, user_context: dict | None) -> dict:
-        """Backward-compatible helper retained for unit and external callers."""
-        if "telegram_id" not in args or not user_context:
-            return args
-        real_tid = str(user_context.get("telegram_id") or "")
-        if not real_tid:
-            return args
-        if str(args["telegram_id"]) != real_tid:
-            logger.warning(
-                f"[Security] LLM передал telegram_id={args['telegram_id']}, "
-                f"заменён на {real_tid}"
-            )
-        args["telegram_id"] = real_tid
-        return args
-
-    async def _call_tool(self, name: str, args: dict) -> str:
-        """Run a tool function off the event loop (Sheets calls are blocking).
-
-        Raises ToolCallError on unknown tool or bad arguments — the caller
-        turns it into a handover, so internal error text never reaches the
-        client.
-        """
+    async def _call_tool(self, name: str, args: dict[str, Any]) -> str:
+        """Backward-compatible raw tool execution helper."""
         fn = TOOL_FUNCTIONS.get(name)
         if not fn:
             raise ToolCallError(f"инструмент '{name}' не найден")
         try:
             return await asyncio.to_thread(fn, **args)
-        except TypeError as e:
-            logger.error(f"[Tool] {name} получил неверные аргументы {args}: {e}")
-            raise ToolCallError(f"{name}: неверные аргументы") from e
+        except TypeError as exc:
+            raise ToolCallError(f"{name}: неверные аргументы") from exc
+
+    async def route(
+        self,
+        history_messages: list[dict[str, Any]],
+        new_message: str,
+        user_context: dict[str, Any] | None = None,
+        *,
+        model_name: str = MODEL_NAME,
+        timeout_s: float | None = None,
+    ) -> RouteDecision:
+        """Ask one model to select one tool without executing that tool."""
+        started = time.perf_counter()
+        timeout_s = timeout_s or GEMINI_TIMEOUT
+        if self.client is None:
+            raise RuntimeError("GEMINI_API_KEY не задан")
+
+        contents = self._history_to_contents(history_messages)
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=new_message)],
+            )
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=self._config(user_context),
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            latency_ms = (time.perf_counter() - started) * 1000
+            logger.error(f"[LLM Timeout] {model_name} не ответил за {timeout_s}с")
+            return RouteDecision(
+                model=model_name,
+                latency_ms=latency_ms,
+                error="timeout",
+            )
+
+        latency_ms = (time.perf_counter() - started) * 1000
+        usage = self._usage(response)
+        fn_calls = self._extract_function_calls(response)
+        if not fn_calls:
+            stray = (getattr(response, "text", "") or "").strip()
+            logger.warning(
+                f"[LLM] {model_name} ответил без tool: {stray[:200]!r}"
+            )
+            return RouteDecision(
+                model=model_name,
+                latency_ms=latency_ms,
+                usage=usage,
+                error="no_tool_call",
+            )
+        if len(fn_calls) != 1:
+            logger.warning(
+                f"[LLM] {model_name} вызвал {len(fn_calls)} tools вместо одного"
+            )
+            return RouteDecision(
+                model=model_name,
+                latency_ms=latency_ms,
+                usage=usage,
+                error="multiple_tool_calls",
+            )
+
+        fn_call = fn_calls[0]
+        tool_name = str(fn_call.name)
+        arguments = dict(fn_call.args or {})
+        if tool_name not in TOOL_FUNCTIONS:
+            return RouteDecision(
+                model=model_name,
+                tool_name=tool_name,
+                arguments=arguments,
+                latency_ms=latency_ms,
+                usage=usage,
+                error="unknown_tool",
+            )
+
+        return RouteDecision(
+            model=model_name,
+            tool_name=tool_name,
+            arguments=arguments,
+            latency_ms=latency_ms,
+            usage=usage,
+        )
 
     async def generate_response(
         self,
-        history_messages: list[dict],
+        history_messages: list[dict[str, Any]],
         new_message: str,
-        user_context: dict | None = None,
+        user_context: dict[str, Any] | None = None,
         _timeout_retry: bool = False,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """
-        Run one dispatcher turn.
-
-        Returns ``(reply_text, handover_reason, admin_notification)``:
-        - ``handover_reason`` is set when a tool requests human support.
-          ``reply_text`` may contain a canonical, case-specific handover reply;
-          otherwise the caller uses ``replies.HANDOVER_CLIENT``.
-        - Otherwise ``reply_text`` is the canonical client-facing text
-          returned by the picked tool.
-        - ``admin_notification`` is a non-blocking service notification;
-          unlike a handover, it must not pause the bot for this client.
-
-        Timeouts never raise: after one retry the method returns
-        ``(None, "LLM timeout", None)`` — i.e. a handover. Internal tool-call
-        failures (unknown tool, bad arguments) also become handovers.
-        Other Gemini exceptions propagate; the handler catches them and
-        shows ``replies.TECH_ERROR``.
-        """
-        config = self._config(user_context)
-        history_contents = self._history_to_contents(history_messages)
-        contents = history_contents + [
-            types.Content(role="user", parts=[types.Part.from_text(text=new_message)])
-        ]
-
-        # Bounded loop: at most a few rounds of function calls per turn.
-        for _round in range(5):
-            try:
-                response = await asyncio.wait_for(
-                    self.client.aio.models.generate_content(
-                        model=self.model_name,
-                        contents=contents,
-                        config=config,
-                    ),
-                    timeout=GEMINI_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"[LLM Timeout] Gemini не ответил за {GEMINI_TIMEOUT}с")
-                if not _timeout_retry:
-                    logger.warning("[LLM Timeout] однократный retry")
-                    return await self.generate_response(
-                        history_messages,
-                        new_message,
-                        user_context,
-                        _timeout_retry=True,
-                    )
-                # После повторного таймаута — handover
-                return None, "LLM timeout", None
-
-            fn_calls = self._extract_function_calls(response)
-
-            if not fn_calls:
-                # LLM ответил свободным текстом, минуя tool. По правилу
-                # стандартизации мы такой ответ клиенту не показываем —
-                # уходим в handover.
-                stray = (getattr(response, "text", "") or "").strip()
-                if stray:
-                    logger.warning(
-                        f"[LLM] Свободный текст без tool: {stray[:200]!r} — handover"
-                    )
-                else:
-                    logger.warning("[LLM] Пустой ответ без tool — handover")
-                return None, "LLM ответил без шаблона", None
-
-            # Execute every requested tool. The dispatcher pattern means
-            # there is normally just one, but we tolerate multiple.
-            function_response_parts = []
-            terminal_result: Optional[str] = None
-            handover_reason: Optional[str] = None
-            handover_reply: Optional[str] = None
-            admin_notification: Optional[str] = None
-
-            for fn_call in fn_calls:
-                tool_name = fn_call.name
-                raw_args = dict(fn_call.args or {})
-                args = self._inject_server_context(tool_name, raw_args, user_context)
-                logger.info(f"[Tool call] {tool_name}({args})")
-
-                try:
-                    result = await self._call_tool(tool_name, args)
-                except ToolCallError as e:
-                    logger.error(f"[Tool] {e} — уходим в handover")
-                    return None, f"внутренняя ошибка инструмента ({e})", None
-
-                # Successful action that needs an admin alert but does not
-                # hand the conversation over or pause the bot.
-                if isinstance(result, str) and result.startswith("__ADMIN_NOTIFY_JSON__:"):
-                    try:
-                        payload = json.loads(result.split(":", 1)[1])
-                        terminal_result = str(payload["client_reply"])
-                        admin_notification = str(payload["notification"])
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        logger.error("[Tool] Некорректный JSON служебного уведомления")
-                        return None, "некорректное служебное уведомление", None
-                    break
-
-                # Categorized handover with a canonical client-facing reply.
-                if isinstance(result, str) and result.startswith("__HANDOVER_JSON__:"):
-                    try:
-                        payload = json.loads(result.split(":", 1)[1])
-                        handover_reason = str(payload["reason"])
-                        handover_reply = str(payload["client_reply"])
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        logger.error("[Tool] Некорректный JSON handover payload")
-                        handover_reason = "некорректный запрос эскалации"
-                    break
-
-                # Generic handover sentinel — short-circuit immediately.
-                if tool_name == "handover_to_admin" or (
-                    isinstance(result, str) and result.startswith("__HANDOVER__")
-                ):
-                    reason = (
-                        result.split(":", 1)[1]
-                        if isinstance(result, str) and ":" in result
-                        else args.get("reason", "не указана")
-                    )
-                    handover_reason = reason
-                    break
-
-                # Terminal tool — its return value IS the client reply.
-                if tool_name in TERMINAL_TOOLS:
-                    terminal_result = result
-                    break
-
-                # Otherwise, send the tool result back to the LLM for another
-                # round. (Currently nothing falls into this branch — every
-                # tool is terminal — but we keep the path for future tools.)
-                function_response_parts.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={"result": result},
-                    )
-                )
-
-            if handover_reason is not None:
-                return handover_reply, handover_reason, None
-            if terminal_result is not None:
-                return terminal_result, None, admin_notification
-
-            # Append model+function_response turns and loop. Should not be
-            # hit in the current dispatcher setup.
-            contents.append(
-                types.Content(
-                    role="model",
-                    parts=[
-                        types.Part(function_call=fc) for fc in fn_calls
-                    ],
-                )
+        """Backward-compatible one-model route-and-execute method."""
+        del _timeout_retry
+        decision = await self.route(
+            history_messages,
+            new_message,
+            user_context,
+            model_name=self.model_name,
+            timeout_s=GEMINI_TIMEOUT,
+        )
+        if decision.error:
+            reason = (
+                "LLM timeout"
+                if decision.error == "timeout"
+                else f"LLM routing error ({decision.error})"
             )
-            contents.append(
-                types.Content(role="user", parts=function_response_parts)
-            )
+            return None, reason, None
 
-        logger.error("[LLM] Превышен лимит раундов tool-calls — handover")
-        return None, "LLM зациклился на tool calls", None
+        try:
+            prepared = self.executor.prepare(
+                decision.tool_name or "",
+                decision.arguments,
+                user_context,
+            )
+            outcome = await self.executor.execute_prepared(
+                decision.tool_name or "",
+                prepared,
+            )
+        except ToolCallError as exc:
+            logger.error(f"[Tool] {exc} — уходим в handover")
+            return None, f"внутренняя ошибка инструмента ({exc})", None
+
+        return (
+            outcome.reply_text,
+            outcome.handover_reason,
+            outcome.admin_notification,
+        )
 
 
 gemini_client = GeminiClient()

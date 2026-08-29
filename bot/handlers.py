@@ -1,7 +1,6 @@
 import asyncio
 import html
 import os
-import re
 import time
 from collections import defaultdict
 
@@ -11,10 +10,11 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 from sqlalchemy.future import select
 
+from assistant.engine import assistant_engine
+from assistant.models import TurnRequest
 from bot import replies
 from db.database import async_session_maker
 from db.models import AdminTopic, BotSetting, MessageHistory, Representative
-from llm.gemini_client import gemini_client
 from logger import logger
 
 router = Router()
@@ -354,112 +354,6 @@ async def _notify_document_task(
     await _send_to_service_topic(bot, notif_text, "Документы")
 
 
-GRATITUDE_PATTERN = re.compile(
-    r"^\s*"
-    r"(?:(?:супер|отлично|понял|поняла|вс[её]\s+понятно|хорошо|класс|реально|от\s+души)"
-    r"[,!.:\s]+)?"
-    r"(?:"
-    r"спасибо(?:(?:\s+вам)?\s+(?:большое|огромное)|\s+вам)?"
-    r"(?:\s+за\s+(?:ответ|информацию|помощь))?"
-    r"(?:\s+от\s+души)?"
-    r"|(?:большое|огромное)(?:\s+вам)?\s+спасибо"
-    r"|благодарю(?:\s+вас)?"
-    r"|спс"
-    r")"
-    r"\s*[!.,):;\"'“”«»😊🙏🙂👍❤️❤]*\s*$",
-    re.IGNORECASE,
-)
-
-
-def is_gratitude_only(text: str | None) -> bool:
-    """Return True only for a standalone thank-you, never for a real question."""
-    return bool(text and GRATITUDE_PATTERN.fullmatch(text))
-
-
-PLACEMENT_REQUEST_PATTERN = re.compile(
-    r"\b(?:размест\w*|опубликов\w*|публикац\w*|реклам\w*|пост\w*)\b",
-    re.IGNORECASE,
-)
-PROMOTIONAL_CONTENT_PATTERN = re.compile(
-    r"\b(?:программ\w*|курс\w*|мероприят\w*|вебинар\w*|конференц\w*|"
-    r"интенсив\w*|марафон\w*|школ\w*|проект\w*|набор\w*)\b",
-    re.IGNORECASE,
-)
-VACANCY_SIGNAL_PATTERN = re.compile(
-    r"\b(?:ваканси\w*|должност\w*|зарплат\w*|трудоустрой\w*|"
-    r"(?:услови|график)\w*\s+работ\w*|"
-    r"ищем\s+(?:кандидат\w*|сотрудник\w*|специалист\w*|"
-    r"преподавател\w*|менеджер\w*))\b",
-    re.IGNORECASE,
-)
-
-
-def is_non_vacancy_promotion(text: str | None) -> bool:
-    """Identify a request to promote a program/event, not a job vacancy."""
-    if not text:
-        return False
-    return bool(
-        PLACEMENT_REQUEST_PATTERN.search(text)
-        and PROMOTIONAL_CONTENT_PATTERN.search(text)
-        and not VACANCY_SIGNAL_PATTERN.search(text)
-    )
-
-@router.message(F.text.regexp(GRATITUDE_PATTERN), F.chat.type == "private")
-async def handle_gratitude(message: Message, bot: Bot):
-    if is_rate_limited(message.from_user.id):
-        await message.answer(replies.RATE_LIMITED)
-        return
-
-    async with async_session_maker() as session:
-        rep = await get_or_create_representative(
-            session,
-            message.from_user.id,
-            message.from_user.username,
-            message.from_user.first_name,
-            bot,
-        )
-
-        user_text = message.text
-
-        # Save user message
-        session.add(
-            MessageHistory(
-                telegram_id=rep.telegram_id,
-                role="user",
-                content=user_text,
-            )
-        )
-        await session.commit()
-
-        # Mirror the client message first. In human/waiting mode the normal
-        # handler would keep the bot silent, so this fast path must do the same.
-        admin_topic = await session.scalar(
-            select(AdminTopic).where(AdminTopic.telegram_id == rep.telegram_id)
-        )
-        await _mirror_to_topic(
-            bot,
-            admin_topic,
-            replies.ADMIN_CLIENT_TEXT.format(text=html.escape(user_text)),
-        )
-        if admin_topic and admin_topic.status in {"waiting_human", "human_mode"}:
-            return
-
-        await message.answer(replies.GRATITUDE)
-        session.add(
-            MessageHistory(
-                telegram_id=rep.telegram_id,
-                role="assistant",
-                content=replies.GRATITUDE,
-            )
-        )
-        await session.commit()
-        await _mirror_to_topic(
-            bot,
-            admin_topic,
-            replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GRATITUDE)),
-        )
-
-
 @router.message(CommandStart(), F.chat.type == "private")
 async def handle_start_command(message: Message, bot: Bot):
     if is_rate_limited(message.from_user.id):
@@ -543,13 +437,12 @@ async def user_private_message(message: Message, bot: Bot):
         user_text = message.text or message.caption
 
         # Save user message
-        session.add(
-            MessageHistory(
-                telegram_id=rep.telegram_id,
-                role="user",
-                content=user_text or "(Медиа/Файл)",
-            )
+        user_record = MessageHistory(
+            telegram_id=rep.telegram_id,
+            role="user",
+            content=user_text or "(Медиа/Файл)",
         )
+        session.add(user_record)
         await session.commit()
 
         # Forward to admin topic so admins see client's input
@@ -652,63 +545,21 @@ async def user_private_message(message: Message, bot: Bot):
             # Bot stays silent in human mode.
             return
 
-        # High-confidence business rule: announcements about programs,
-        # courses and events are advertising, even when participation is free.
-        # This prevents words such as "бесплатно" and "стажировка" from
-        # incorrectly routing a promotional post to the vacancy form.
-        if is_non_vacancy_promotion(user_text):
-            reply_text = replies.FAQ_PAID_POST
-            session.add(
-                MessageHistory(
-                    telegram_id=rep.telegram_id,
-                    role="assistant",
-                    content=reply_text,
-                )
-            )
-            await session.commit()
-            await message.answer(reply_text)
-            await _mirror_to_topic(
-                bot,
-                admin_topic,
-                replies.ADMIN_BOT_REPLY.format(text=html.escape(reply_text)),
-            )
-            return
-
         async with user_llm_locks[rep.telegram_id]:
             history_query = await session.execute(
                 select(MessageHistory)
-                .where(MessageHistory.telegram_id == rep.telegram_id)
-                .order_by(MessageHistory.created_at.desc())
-                .limit(40)
+                .where(
+                    MessageHistory.telegram_id == rep.telegram_id,
+                    MessageHistory.id != user_record.id,
+                )
+                .order_by(MessageHistory.id.desc())
+                .limit(39)
             )
             history_records = list(reversed(history_query.scalars().all()))
-
-            gemini_history: list[dict] = []
-            for r in history_records:
-                if r.role == "assistant":
-                    role = "model"
-                    content = r.content
-                elif r.role == "admin":
-                    role = "user"
-                    content = f"[Менеджер]: {r.content}"
-                else:
-                    role = "user"
-                    content = r.content
-
-                if gemini_history and gemini_history[-1]["role"] == role:
-                    gemini_history[-1]["parts"][0] += f"\n{content}"
-                else:
-                    gemini_history.append({"role": role, "parts": [content]})
-
-            if not gemini_history:
-                return
-
-            last_turn = gemini_history.pop()
-            if last_turn["role"] == "model":
-                gemini_history.append(last_turn)
-                combined_user_text = user_text
-            else:
-                combined_user_text = last_turn["parts"][0]
+            conversation_history = [
+                {"role": record.role, "content": record.content}
+                for record in history_records
+            ]
 
             user_context = {
                 "telegram_id": rep.telegram_id,
@@ -722,14 +573,12 @@ async def user_private_message(message: Message, bot: Bot):
             }
 
             try:
-                (
-                    reply_text,
-                    handover_reason,
-                    admin_notification,
-                ) = await gemini_client.generate_response(
-                    gemini_history,
-                    combined_user_text,
-                    user_context=user_context,
+                turn_result = await assistant_engine.process_turn(
+                    TurnRequest(
+                        message=user_text,
+                        history=conversation_history,
+                        user_context=user_context,
+                    )
                 )
             except Exception as e:
                 logger.error(f"Ошибка LLM для пользователя {rep.telegram_id}: {e}")
@@ -740,6 +589,25 @@ async def user_private_message(message: Message, bot: Bot):
                     replies.ADMIN_LLM_ERROR.format(error=html.escape(str(e))),
                 )
                 return
+
+            if turn_result.error:
+                logger.error(
+                    f"Ошибка assistant engine для пользователя {rep.telegram_id}: "
+                    f"{turn_result.error}"
+                )
+                await message.answer(replies.TECH_ERROR)
+                await _mirror_to_topic(
+                    bot,
+                    admin_topic,
+                    replies.ADMIN_LLM_ERROR.format(
+                        error=html.escape(turn_result.error)
+                    ),
+                )
+                return
+
+            reply_text = turn_result.reply_text
+            handover_reason = turn_result.handover_reason
+            admin_notification = turn_result.admin_notification
 
             if handover_reason is not None:
                 # Handover — fixed canonical reply, escalate in admin group.
