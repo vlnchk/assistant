@@ -14,6 +14,7 @@ runs. The LLM cannot pull someone else's data even if prompt-injected.
 
 import asyncio
 import datetime
+import json
 import os
 from typing import Optional
 
@@ -31,12 +32,15 @@ from llm.tools import (
     faq_stats,
     faq_ord,
     faq_docs,
+    answer_information,
     ask_ad_topic,
     get_free_slots,
     check_dates_availability,
     book_slot,
     get_client_bookings,
     create_document_task,
+    request_publication_support,
+    request_mutual_pr_support,
     handover_to_admin,
 )
 from logger import logger
@@ -55,8 +59,21 @@ SYSTEM_PROMPT_TEMPLATE = """Сегодня: {current_date}.
 На любое сообщение пользователя ты ОБЯЗАН выбрать ровно ОДИН инструмент из списка и вызвать его.
 Не пытайся генерировать тексты для клиентов самостоятельно (даже цены или описания) — бот сам отправит эталонный текст после вызова нужной функции.
 
+Если в ОДНОМ сообщении несколько информационных вопросов, вызови ровно один
+answer_information и перечисли ВСЕ нужные темы. Например:
+  «Сколько стоит, какие форматы и есть ли даты в июне?»
+  → answer_information(topics=["paid_post", "ad_formats", "free_slots"], month="июнь")
+Такой составной tool остаётся одним вызовом, но вернёт несколько канонических
+блоков. Не выбирай только один FAQ и не теряй остальные вопросы клиента.
+
+За один ход разрешено не более ОДНОГО изменяющего действия: бронирование,
+создание задачи по документам или передача конкретной операции менеджеру.
+Если клиент явно просит выполнить действие, выбери это действие; не пытайся
+одновременно вызвать дополнительные tools.
+
 ЕСЛИ НИ ОДИН ИНСТРУМЕНТ НЕ ПОДХОДИТ или ситуация нестандартная — вызови инструмент handover_to_admin.
-Никогда не отвечай текстом на «спасибо» и «пока» — для этого вызови инструмент reply_offtopic.
+Если до LLM дошла чистая благодарность или прощание — вызови reply_offtopic;
+но благодарность перед реальным вопросом не должна скрывать вопрос.
 
 --- ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА ---
 
@@ -66,9 +83,13 @@ SYSTEM_PROMPT_TEMPLATE = """Сегодня: {current_date}.
 Вопрос «ты бот?» / «у тебя есть чувства?» / «как тебя зовут?»:
   → reply_bot_nature
 
-Болталка, погода, шутки, личные темы, благодарности, прощания, любые
+Болталка, погода, шутки, личные темы, прощания, любые
 вопросы не по теме канала:
   → reply_offtopic
+
+Чистые благодарности перехватываются кодом до LLM. Если благодарность является
+только вводной частью вопроса («Спасибо, а какие даты свободны?»), игнорируй
+вводную благодарность и обработай сам вопрос.
 
 Вопросы про размещение вакансии через стандартную форму:
   → faq_free_posting
@@ -81,10 +102,21 @@ SYSTEM_PROMPT_TEMPLATE = """Сегодня: {current_date}.
     - «Опубликуйте, пожалуйста, вакансию»
   НИКОГДА не сочиняй текст про размещение вакансии или URL формы —
   ВСЕГДА вызывай faq_free_posting, в нём уже есть нужная ссылка.
+  ИСКЛЮЧЕНИЕ: если клиент спрашивает цену размещения вакансии, разницу
+  бесплатного и платного вариантов, свой формат, готовый текст, отсутствие
+  прямых контактов или изображение — вызывай
+  answer_information(topics=["vacancy_options"]), а не faq_free_posting.
 
-Вопросы про цену рекламы / платных постов / акции «4+1» / готовый пост
-от клиента (свой текст, без формы):
+Вопросы именно про рекламу / промопост (не вакансию), цену рекламного поста
+или акцию «4+1»:
   → faq_paid_post
+  Объявления о программах, курсах, школах, мероприятиях, вебинарах,
+  интенсивах и наборах на обучение — это рекламные посты, а НЕ вакансии.
+  Фразы «бесплатно для студентов/участников», «благотворительный проект»
+  или обещание стажировки описывают продукт и НЕ делают размещение бесплатным.
+  Если просят разместить информацию о таком проекте в канале или паблике,
+  вызывай faq_paid_post. Бесплатная форма допустима только для настоящей
+  вакансии: конкретной должности или поиска сотрудника.
 
 Вопросы про охваты, ERR, аудиторию, географию:
   → faq_stats
@@ -94,6 +126,21 @@ SYSTEM_PROMPT_TEMPLATE = """Сегодня: {current_date}.
 
 Вопросы про документы, ЭДО, договор, оплату по форме клиента:
   → faq_docs
+
+НОВЫЕ И СОСТАВНЫЕ FAQ через answer_information:
+  - платная вакансия или сравнение бесплатной и платной вакансии
+    → vacancy_options
+  - вопрос о бесплатной рекламе → free_advertising
+  - форматы, фото/видео, нативный пост, закреп, редактура → ad_formats
+  - переходы, CTR, конверсия, CPA → performance
+  - ИП/СЗ, НДС, реквизиты, юридическая форма оплаты → payment_legal
+  - CPA, агентская модель, оплата за установки → partnerships
+  - взаимопиар, взаимный пиар или «ВП» → request_mutual_pr_support
+    Это обязательная эскалация менеджеру, не используй partnerships.
+  - поиск работы, просмотр вакансий, размещение резюме → jobseeker
+  - сроки и общие правила модерации бесплатной вакансии → moderation
+  - вопрос о точном времени публикации → publication_time
+Для одного такого вопроса тоже используй answer_information с одной темой.
 
 Клиент хочет узнать свободные даты:
   - общий вопрос («какие свободные даты?», «когда можно?», «давай»)
@@ -110,11 +157,35 @@ SYSTEM_PROMPT_TEMPLATE = """Сегодня: {current_date}.
   - если НЕ известна тематика рекламы → ask_ad_topic
   - если тематика запрещена (казино, ставки, крипта, политика, серые
     схемы, БАДы, инфоцыганство) → handover_to_admin
-  - иначе → book_slot(date, client, ad_topic, telegram_id, ...)
+  - если тематика допустима, но дата ещё НЕ названа → get_free_slots()
+    Бот покажет 5 ближайших дат и спросит, подходит ли одна из них.
+  - если показанные даты не подходят и клиент называет другие конкретные
+    даты без явной команды бронировать → check_dates_availability(dates=[...])
+  - если тематика и дата известны и клиент явно просит забронировать
+    → book_slot(date, client, ad_topic, telegram_id, ...)
 
 Клиент просит счёт / договор / акт:
-  → create_document_task(doc_type, telegram_id, contact, link)
+  - если он только спрашивает, как устроены документы → faq_docs
+  - если фактически просит подготовить документ, но нет названия/ФИО и ИНН
+    → create_document_task без выдумывания данных; tool сам попросит реквизиты
+  - если название/ФИО и ИНН уже есть в сообщении или истории
+    → create_document_task(doc_type, telegram_id, company, inn, requisites, contact, link)
   (это запрос ДОКУМЕНТА, а не готовность к оплате — не зови менеджера)
+
+Клиент спрашивает про уже отправленную заявку или опубликованный пост:
+  - срок и общие правила модерации → answer_information(topics=["moderation"])
+  - проверить статус → request_publication_support(issue="status", ...)
+  - исправить → request_publication_support(issue="edit", ...)
+  - удалить → request_publication_support(issue="delete", ...)
+  - ускорить → request_publication_support(issue="expedite", ...)
+  - перевести бесплатную заявку в платную
+    → request_publication_support(issue="convert_to_paid", ...)
+  - ссылка на форму не работает
+    → request_publication_support(issue="broken_form", ...)
+  - узнать решение по рекламной тематике
+    → request_publication_support(issue="approval_status", ...)
+Передавай только факты и ссылки из диалога. Tool сам запросит недостающие данные
+или создаст категоризированную эскалацию.
 
 Клиент готов платить, или хочет поговорить с человеком, или задаёт
 вопрос, на который ни один инструмент выше не подходит:
@@ -158,12 +229,15 @@ TOOL_FUNCTIONS = {
     "faq_stats": faq_stats,
     "faq_ord": faq_ord,
     "faq_docs": faq_docs,
+    "answer_information": answer_information,
     "ask_ad_topic": ask_ad_topic,
     "get_free_slots": get_free_slots,
     "check_dates_availability": check_dates_availability,
     "book_slot": book_slot,
     "get_client_bookings": get_client_bookings,
     "create_document_task": create_document_task,
+    "request_publication_support": request_publication_support,
+    "request_mutual_pr_support": request_mutual_pr_support,
     "handover_to_admin": handover_to_admin,
 }
 
@@ -185,6 +259,11 @@ class GeminiClient:
         return types.GenerateContentConfig(
             system_instruction=_build_system_prompt(user_context),
             tools=bot_tools,
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.ANY,
+                )
+            ),
             temperature=0.2,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(
                 disable=True,
@@ -223,13 +302,45 @@ class GeminiClient:
                     calls.append(fc)
         return calls
 
+    def _inject_server_context(
+        self,
+        tool_name: str,
+        args: dict,
+        user_context: dict | None,
+    ) -> dict:
+        """Inject identity and admin links from trusted server-side context."""
+        args = dict(args)
+        if not user_context:
+            return args
+
+        identity_tools = {"book_slot", "get_client_bookings", "create_document_task"}
+        real_tid = str(user_context.get("telegram_id") or "")
+        if tool_name in identity_tools and real_tid:
+            supplied_tid = args.get("telegram_id")
+            if supplied_tid is not None and str(supplied_tid) != real_tid:
+                logger.warning(
+                    f"[Security] LLM передал telegram_id={supplied_tid}, "
+                    f"заменён на {real_tid}"
+                )
+            args["telegram_id"] = real_tid
+
+        if tool_name in {"book_slot", "create_document_task"}:
+            args["link"] = str(user_context.get("dialog_link") or "")
+
+        if tool_name == "create_document_task":
+            username = user_context.get("username")
+            first_name = user_context.get("first_name")
+            args["contact"] = f"@{username}" if username else str(first_name or "")
+
+        return args
+
     def _inject_real_telegram_id(self, args: dict, user_context: dict | None) -> dict:
-        """Force-replace any telegram_id with the real one from user_context."""
-        if "telegram_id" not in args:
+        """Backward-compatible helper retained for unit and external callers."""
+        if "telegram_id" not in args or not user_context:
             return args
-        if not user_context or not user_context.get("telegram_id"):
+        real_tid = str(user_context.get("telegram_id") or "")
+        if not real_tid:
             return args
-        real_tid = str(user_context["telegram_id"])
         if str(args["telegram_id"]) != real_tid:
             logger.warning(
                 f"[Security] LLM передал telegram_id={args['telegram_id']}, "
@@ -260,19 +371,21 @@ class GeminiClient:
         new_message: str,
         user_context: dict | None = None,
         _timeout_retry: bool = False,
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Run one dispatcher turn.
 
-        Returns ``(reply_text, handover_reason)``:
-        - ``handover_reason`` is set only when the LLM picked
-          ``handover_to_admin``. ``reply_text`` is ``None`` in that case;
-          the caller must use ``replies.HANDOVER_CLIENT``.
+        Returns ``(reply_text, handover_reason, admin_notification)``:
+        - ``handover_reason`` is set when a tool requests human support.
+          ``reply_text`` may contain a canonical, case-specific handover reply;
+          otherwise the caller uses ``replies.HANDOVER_CLIENT``.
         - Otherwise ``reply_text`` is the canonical client-facing text
           returned by the picked tool.
+        - ``admin_notification`` is a non-blocking service notification;
+          unlike a handover, it must not pause the bot for this client.
 
         Timeouts never raise: after one retry the method returns
-        ``(None, "LLM timeout")`` — i.e. a handover. Internal tool-call
+        ``(None, "LLM timeout", None)`` — i.e. a handover. Internal tool-call
         failures (unknown tool, bad arguments) also become handovers.
         Other Gemini exceptions propagate; the handler catches them and
         shows ``replies.TECH_ERROR``.
@@ -305,7 +418,7 @@ class GeminiClient:
                         _timeout_retry=True,
                     )
                 # После повторного таймаута — handover
-                return None, "LLM timeout"
+                return None, "LLM timeout", None
 
             fn_calls = self._extract_function_calls(response)
 
@@ -320,27 +433,52 @@ class GeminiClient:
                     )
                 else:
                     logger.warning("[LLM] Пустой ответ без tool — handover")
-                return None, "LLM ответил без шаблона"
+                return None, "LLM ответил без шаблона", None
 
             # Execute every requested tool. The dispatcher pattern means
             # there is normally just one, but we tolerate multiple.
             function_response_parts = []
             terminal_result: Optional[str] = None
             handover_reason: Optional[str] = None
+            handover_reply: Optional[str] = None
+            admin_notification: Optional[str] = None
 
             for fn_call in fn_calls:
                 tool_name = fn_call.name
                 raw_args = dict(fn_call.args or {})
-                args = self._inject_real_telegram_id(raw_args, user_context)
+                args = self._inject_server_context(tool_name, raw_args, user_context)
                 logger.info(f"[Tool call] {tool_name}({args})")
 
                 try:
                     result = await self._call_tool(tool_name, args)
                 except ToolCallError as e:
                     logger.error(f"[Tool] {e} — уходим в handover")
-                    return None, f"внутренняя ошибка инструмента ({e})"
+                    return None, f"внутренняя ошибка инструмента ({e})", None
 
-                # Handover sentinel — short-circuit immediately.
+                # Successful action that needs an admin alert but does not
+                # hand the conversation over or pause the bot.
+                if isinstance(result, str) and result.startswith("__ADMIN_NOTIFY_JSON__:"):
+                    try:
+                        payload = json.loads(result.split(":", 1)[1])
+                        terminal_result = str(payload["client_reply"])
+                        admin_notification = str(payload["notification"])
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        logger.error("[Tool] Некорректный JSON служебного уведомления")
+                        return None, "некорректное служебное уведомление", None
+                    break
+
+                # Categorized handover with a canonical client-facing reply.
+                if isinstance(result, str) and result.startswith("__HANDOVER_JSON__:"):
+                    try:
+                        payload = json.loads(result.split(":", 1)[1])
+                        handover_reason = str(payload["reason"])
+                        handover_reply = str(payload["client_reply"])
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        logger.error("[Tool] Некорректный JSON handover payload")
+                        handover_reason = "некорректный запрос эскалации"
+                    break
+
+                # Generic handover sentinel — short-circuit immediately.
                 if tool_name == "handover_to_admin" or (
                     isinstance(result, str) and result.startswith("__HANDOVER__")
                 ):
@@ -368,9 +506,9 @@ class GeminiClient:
                 )
 
             if handover_reason is not None:
-                return None, handover_reason
+                return handover_reply, handover_reason, None
             if terminal_result is not None:
-                return terminal_result, None
+                return terminal_result, None, admin_notification
 
             # Append model+function_response turns and loop. Should not be
             # hit in the current dispatcher setup.
@@ -387,7 +525,7 @@ class GeminiClient:
             )
 
         logger.error("[LLM] Превышен лимит раундов tool-calls — handover")
-        return None, "LLM зациклился на tool calls"
+        return None, "LLM зациклился на tool calls", None
 
 
 gemini_client = GeminiClient()

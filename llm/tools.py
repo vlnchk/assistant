@@ -7,13 +7,45 @@ text. Docstrings are in English on purpose — they are routing metadata for
 Gemini and never reach the client.
 
 Convention: every tool returns ``str``. The handler treats the return value
-as the final reply to the client (with two exceptions: ``handover_to_admin``
-returns a ``__HANDOVER__:<reason>`` sentinel; ``get_free_slots`` /
-``get_client_bookings`` return already-formatted text).
+as the final reply to the client, except for internal structured sentinels
+used for handover and non-blocking admin notifications.
 """
+
+import json
+import re
 
 from bot import replies
 from services.google_sheets import sheets_service
+
+
+INFORMATION_REPLIES = {
+    "free_posting": replies.FAQ_FREE_POSTING,
+    "vacancy_options": replies.FAQ_VACANCY_OPTIONS,
+    "free_advertising": replies.FAQ_FREE_ADVERTISING,
+    "paid_post": replies.FAQ_PAID_POST,
+    "ad_formats": replies.FAQ_AD_FORMATS,
+    "stats": replies.FAQ_STATS,
+    "performance": replies.FAQ_PERFORMANCE,
+    "ord": replies.FAQ_ORD,
+    "docs": replies.FAQ_DOCS,
+    "payment_legal": replies.FAQ_PAYMENT_LEGAL,
+    "partnerships": replies.FAQ_PARTNERSHIPS,
+    "jobseeker": replies.FAQ_JOBSEEKER,
+    "moderation": replies.FAQ_MODERATION,
+    "publication_time": replies.FAQ_PUBLICATION_TIME,
+}
+
+
+def _handover_with_reply(reason: str, client_reply: str) -> str:
+    """Encode a categorized handover without exposing arbitrary LLM text."""
+    payload = {"reason": reason, "client_reply": client_reply}
+    return "__HANDOVER_JSON__:" + json.dumps(payload, ensure_ascii=False)
+
+
+def _admin_notify_with_reply(notification: str, client_reply: str) -> str:
+    """Encode a non-blocking admin notification plus the client reply."""
+    payload = {"notification": notification, "client_reply": client_reply}
+    return "__ADMIN_NOTIFY_JSON__:" + json.dumps(payload, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +90,10 @@ def faq_free_posting() -> str:
     """
     Explain that posting a regular job vacancy is free and point the client
     to the submission form. Use when the client wants to publish a vacancy
-    via the standard form, or asks "how do I post a vacancy?" / "сколько
-    стоит разместить вакансию".
+    via the standard form, or asks only "how do I post a vacancy?". For price,
+    own-format or free-vs-paid questions use answer_information with
+    vacancy_options instead. Never use for a program, course, event, school
+    or educational project merely because participation is free.
     """
     return replies.FAQ_FREE_POSTING
 
@@ -68,8 +102,11 @@ def faq_paid_post() -> str:
     """
     Explain pricing for paid promotional posts (15 000 ₽ per post, 5th post
     free when 4 are paid at once, 24h top placement). Use when the client
-    asks about ad pricing, custom-format vacancy posting, or wants to buy
-    promotion in the channel.
+    asks about ad pricing or wants to buy promotion in the channel. For a
+    vacancy where the client compares free and custom-format placement, use
+    answer_information with vacancy_options. Announcements about programs,
+    courses, events and educational projects are promotional posts even when
+    they are free for students or include an internship.
     """
     return replies.FAQ_PAID_POST
 
@@ -100,6 +137,79 @@ def faq_docs() -> str:
     EDI, or how documents are exchanged.
     """
     return replies.FAQ_DOCS
+
+
+def answer_information(
+    topics: list[str],
+    month: str = "",
+    dates: list[str] | None = None,
+) -> str:
+    """
+    Build one deterministic answer for one or several informational intents.
+
+    Use this tool whenever a single client message asks two or more questions.
+    It is also the only tool for the new FAQ topics listed below. Every block
+    comes from bot.replies; never invent or paraphrase an answer.
+
+    Allowed topics:
+      - free_posting: standard free vacancy submission form;
+      - vacancy_options: compare free and paid custom-format vacancy posting
+        (from 3 000 ₽, optional direct contacts, image allowed);
+      - free_advertising: clarify that ads are paid while vacancies may be free;
+      - paid_post: non-vacancy advertising price, 4+1 offer and 24-hour top;
+      - ad_formats: text/photo/video/native format, pinning and editing;
+      - stats: reach, ERR and audience geography;
+      - performance: clicks, CTR, conversion and CPA availability;
+      - ord: advertisement labelling;
+      - docs: general document workflow;
+      - payment_legal: self-employed/IP, VAT, payment and signing details;
+      - partnerships: CPA, affiliate and agency cooperation (not mutual PR);
+      - jobseeker: finding a job, viewing vacancies or posting a CV;
+      - moderation: review timing and why a free vacancy may not appear;
+      - publication_time: exact publication-time policy;
+      - free_slots: available advertisement dates.
+
+    Calendar arguments:
+      - dates with one or more concrete dates checks those exact dates;
+      - month returns all free dates in that month;
+      - free_slots without dates/month returns the five nearest dates.
+
+    Args:
+        topics: One or more allowed topic keys, in the client's question order.
+        month: Russian month name only when explicitly named by the client.
+        dates: Concrete dates only when explicitly named by the client.
+    """
+    blocks: list[str] = []
+    seen: set[str] = set()
+    unknown: list[str] = []
+
+    for topic in topics or []:
+        normalized = str(topic).strip().lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        block = INFORMATION_REPLIES.get(normalized)
+        if block:
+            blocks.append(block)
+        elif normalized != "free_slots":
+            unknown.append(normalized)
+
+    if unknown:
+        return "__HANDOVER__:неизвестная информационная тема"
+
+    wants_slots = "free_slots" in seen or bool(month) or bool(dates)
+    if wants_slots:
+        if dates:
+            blocks.append(sheets_service.check_dates_availability(dates))
+        else:
+            blocks.append(sheets_service.get_free_slots(month))
+
+    if not blocks:
+        return "__HANDOVER__:неизвестная информационная тема"
+
+    # The same canonical block can be selected through aliases or overlapping
+    # topics. Remove exact duplicates while preserving the requested order.
+    return "\n\n".join(dict.fromkeys(blocks))
 
 
 def ask_ad_topic() -> str:
@@ -213,6 +323,9 @@ def get_client_bookings(telegram_id: str) -> str:
 def create_document_task(
     doc_type: str,
     telegram_id: str,
+    company: str = "",
+    inn: str = "",
+    requisites: str = "",
     contact: str = "",
     link: str = "",
 ) -> str:
@@ -226,11 +339,114 @@ def create_document_task(
     Args:
         doc_type: Type of document (счёт, договор, акт).
         telegram_id: Always take from the ТЕКУЩИЙ ПОЛЬЗОВАТЕЛЬ section.
+        company: Company name or the customer's full legal name.
+        inn: Russian taxpayer number, exactly 10 or 12 digits.
+        requisites: Other payment details supplied by the client. Never invent.
         contact: Client's contact / username from ТЕКУЩИЙ ПОЛЬЗОВАТЕЛЬ.
         link: Direct link to the Telegram topic.
     """
-    return sheets_service.create_document_task(
-        "", "", doc_type, contact, link, telegram_id=telegram_id
+    company = str(company or "").strip()
+    inn = re.sub(r"\D", "", str(inn or ""))
+    if not company and not inn:
+        return replies.DOC_NEED_DETAILS
+    if not company:
+        return replies.DOC_NEED_COMPANY
+    if not inn:
+        return replies.DOC_NEED_INN
+    if len(inn) not in {10, 12}:
+        return replies.DOC_BAD_INN
+    client_reply = sheets_service.create_document_task(
+        company,
+        inn,
+        doc_type,
+        contact,
+        link,
+        telegram_id=telegram_id,
+        requisites=requisites,
+    )
+    expected_reply = replies.DOC_CREATED.format(doc_type=doc_type)
+    if client_reply != expected_reply:
+        return client_reply
+
+    notification = (
+        f"Подготовить документ: {doc_type}; компания: {company}; ИНН: {inn}"
+    )
+    return _admin_notify_with_reply(notification, client_reply)
+
+
+def request_publication_support(
+    issue: str,
+    vacancy_name: str = "",
+    publication_link: str = "",
+    details: str = "",
+) -> str:
+    """
+    Collect a concrete publication problem and hand it to a manager.
+
+    Use for an already submitted or published vacancy/ad. Supported issue
+    values: status, edit, delete, expedite, convert_to_paid, broken_form,
+    approval_status. This tool never changes or deletes a publication itself.
+
+    Args:
+        issue: One supported issue value.
+        vacancy_name: Vacancy or campaign name if the client supplied it.
+        publication_link: Telegram post URL if the client supplied it.
+        details: Short factual details from the client; never invent details.
+    """
+    issue = str(issue or "").strip().lower()
+    supported = {
+        "status": "проверить статус заявки",
+        "edit": "исправить публикацию",
+        "delete": "удалить публикацию",
+        "expedite": "ускорить публикацию",
+        "convert_to_paid": "перевести бесплатную заявку в платное размещение",
+        "broken_form": "проверить неработающую форму",
+        "approval_status": "проверить согласование рекламной тематики",
+    }
+    if issue not in supported:
+        return "__HANDOVER__:неизвестный запрос по публикации"
+
+    vacancy_name = str(vacancy_name or "").strip()
+    publication_link = str(publication_link or "").strip()
+    details = str(details or "").strip()
+
+    if issue in {"status", "expedite", "convert_to_paid"} and not (
+        vacancy_name or details
+    ):
+        return replies.PUBLICATION_NEED_VACANCY
+    if issue in {"edit", "delete"} and not publication_link:
+        return replies.PUBLICATION_NEED_LINK
+    if issue == "approval_status" and not (vacancy_name or details):
+        return replies.BOOK_NEED_AD_TOPIC
+
+    reason_parts = [supported[issue]]
+    if vacancy_name:
+        reason_parts.append(f"название: {vacancy_name[:300]}")
+    if publication_link:
+        reason_parts.append(f"ссылка: {publication_link[:500]}")
+    if details:
+        reason_parts.append(f"детали: {details[:700]}")
+    reason = "; ".join(reason_parts)
+    client_reply = (
+        replies.PUBLICATION_FORM_BROKEN
+        if issue == "broken_form"
+        else replies.PUBLICATION_SUPPORT_SENT
+    )
+    return _handover_with_reply(reason, client_reply)
+
+
+def request_mutual_pr_support() -> str:
+    """
+    Hand a mutual-promotion proposal to a manager.
+
+    Always use this tool when the client mentions mutual PR, reciprocal
+    promotion, "взаимопиар", "взаимный пиар" or the abbreviation "ВП".
+    This is a real handover: the manager is notified and the bot pauses.
+    Do not use the informational partnerships topic for mutual PR.
+    """
+    return _handover_with_reply(
+        "предложение по взаимопиару (ВП)",
+        replies.MUTUAL_PR_HANDOVER,
     )
 
 
@@ -270,12 +486,15 @@ TERMINAL_TOOLS = {
     "faq_stats",
     "faq_ord",
     "faq_docs",
+    "answer_information",
     "ask_ad_topic",
     "book_slot",
     "get_free_slots",
     "check_dates_availability",
     "get_client_bookings",
     "create_document_task",
+    "request_publication_support",
+    "request_mutual_pr_support",
 }
 
 bot_tools = [
@@ -287,11 +506,14 @@ bot_tools = [
     faq_stats,
     faq_ord,
     faq_docs,
+    answer_information,
     ask_ad_topic,
     get_free_slots,
     check_dates_availability,
     book_slot,
     get_client_bookings,
     create_document_task,
+    request_publication_support,
+    request_mutual_pr_support,
     handover_to_admin,
 ]

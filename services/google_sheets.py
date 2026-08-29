@@ -167,11 +167,18 @@ def _get_row_value(row: dict, prefix: str):
     return ""
 
 
+def _safe_cell(value, max_length: int = 2000) -> str:
+    """Store user-provided text as data, never as a Google Sheets formula."""
+    text = str(value or "").strip()[:max_length]
+    if text.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
 class GoogleSheetsService:
     def __init__(self):
         self.client = None
         self.spreadsheet = None
-        self._connect()
 
     def _connect(self):
         """Connect to Google Sheets. gspread does its own retry internally,
@@ -400,21 +407,26 @@ class GoogleSheetsService:
                             })
 
                     _add_update("Статус слота", "Забронирован")
-                    _add_update("Клиент", client)
-                    _add_update("Ссылка на диалог", link)
-                    _add_update("Комментари", comments)
+                    _add_update("Клиент", _safe_cell(client, 300))
+                    _add_update("Ссылка на диалог", _safe_cell(link, 500))
+                    _add_update("Комментари", _safe_cell(comments))
                     if telegram_id:
-                        _add_update("Telegram ID", str(telegram_id))
+                        _add_update("Telegram ID", _safe_cell(telegram_id, 30))
                     if ad_topic:
-                        _add_update("Тематика рекламы", ad_topic)
+                        _add_update("Тематика рекламы", _safe_cell(ad_topic, 500))
                     if publish_time:
-                        _add_update("Время публикации", publish_time)
+                        _add_update("Время публикации", _safe_cell(publish_time, 100))
 
                     if not updates:
                         return replies.BOOK_ERROR.format(
                             error="не найдены нужные колонки в таблице"
                         )
                     sheet.batch_update(updates)
+                    if publish_time:
+                        return replies.BOOK_SUCCESS_TIME_PENDING.format(
+                            date=requested_label,
+                            publish_time=str(publish_time).strip()[:100],
+                        )
                     return replies.BOOK_SUCCESS.format(date=requested_label)
 
             return replies.BOOK_NOT_FOUND.format(date=requested_label)
@@ -491,6 +503,7 @@ class GoogleSheetsService:
         contact: str,
         link: str,
         telegram_id: str = "",
+        requisites: str = "",
     ) -> str:
         """
         Writes a new task to the 'Задачи (Документы)' sheet.
@@ -504,18 +517,34 @@ class GoogleSheetsService:
             from datetime import datetime
             now_str = datetime.now().strftime("%d.%m %H:%M")
             sheet = self.spreadsheet.worksheet("Задачи (Документы)")
+            headers = sheet.row_values(1)
 
-            # | Дата и Время | Статус | Тип документа | Название Клиента | ИНН | Telegram ID | Контактное лицо | Ссылка на диалог |
-            new_row = [
-                now_str,
-                "В очереди",
-                doc_type,
-                company,
-                inn,
-                str(telegram_id) if telegram_id else "",
-                contact,
-                link,
-            ]
+            values = {
+                "Дата и Время": now_str,
+                "Статус": "В очереди",
+                "Тип документа": _safe_cell(doc_type, 100),
+                "Название Клиента": _safe_cell(company, 300),
+                "ИНН": _safe_cell(inn, 20),
+                "Telegram ID": _safe_cell(telegram_id, 30),
+                "Контактное лицо": _safe_cell(contact, 300),
+                "Ссылка на диалог": _safe_cell(link, 500),
+                "Реквизиты / комментарий": _safe_cell(requisites, 3000),
+            }
+
+            # Older sheets do not have the requisites column. Extend the
+            # schema in place and then build the row by header names, so a
+            # custom column order cannot shift company/INN into wrong cells.
+            for header_name in values:
+                if not _find_header(headers, header_name):
+                    next_col = len(headers) + 1
+                    sheet.update_cell(1, next_col, header_name)
+                    headers.append(header_name)
+
+            new_row = [""] * len(headers)
+            for prefix, value in values.items():
+                header = _find_header(headers, prefix)
+                if header:
+                    new_row[headers.index(header)] = value
             sheet.append_row(new_row, table_range="A1")
             return replies.DOC_CREATED.format(doc_type=doc_type)
         except Exception as e:

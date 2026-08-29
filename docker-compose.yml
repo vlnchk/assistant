@@ -1,15 +1,22 @@
-version: '3.8'
-
 services:
   bot:
     build: .
     container_name: edujobs_bot
     restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - .env
+    environment:
+      BOT_LOG_FILE: /app/data/bot.log
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     volumes:
       # Прокидываем папку data для базы данных SQLite, чтобы она не удалялась при перезапуске
       - ./data:/app/data
-      # Прокидываем JSON-ключ от Google API (если не добавишь его внутрь образа)
-      # Закомментируй или удали строку ниже, если файл копируется внутрь образа при сборке
-      # - ./ejs-admin-bot-a275ca626752.json:/app/ejs-admin-bot-a275ca626752.json:ro
+      # Ключ Google не попадает в образ и доступен контейнеру только для чтения.
+      - ./ejs-admin-bot-a275ca626752.json:/app/ejs-admin-bot-a275ca626752.json:ro

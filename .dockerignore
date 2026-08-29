@@ -1,8 +1,10 @@
 .venv/
 .env
+*.json
 __pycache__/
 *.pyc
 .git/
 .gitignore
 db.sqlite3
 data/
+bot.log*

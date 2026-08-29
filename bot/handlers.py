@@ -6,6 +6,7 @@ import time
 from collections import defaultdict
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 from sqlalchemy.future import select
@@ -28,13 +29,18 @@ except ValueError:
     SUPERGROUP_CHAT_ID = None
 
 try:
-    ESCALATION_TOPIC_ID = int(ESCALATION_TOPIC_ID_STR) if ESCALATION_TOPIC_ID_STR else None
+    CONFIGURED_ESCALATION_TOPIC_ID = (
+        int(ESCALATION_TOPIC_ID_STR) if ESCALATION_TOPIC_ID_STR else None
+    )
 except ValueError:
-    ESCALATION_TOPIC_ID = None
+    CONFIGURED_ESCALATION_TOPIC_ID = None
+
+ESCALATION_TOPIC_ID: int | None = None
 
 
 user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 user_llm_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+escalation_topic_lock = asyncio.Lock()
 
 # Rate limiting: max 10 messages per minute per user
 RATE_LIMIT = 10
@@ -168,37 +174,126 @@ async def get_or_create_representative(
         return rep
 
 
-async def get_or_create_escalation_topic(bot: Bot) -> int | None:
-    """Returns the message_thread_id of the escalation topic, creating it if necessary."""
+async def get_or_create_escalation_topic(
+    bot: Bot,
+    stale_topic_id: int | None = None,
+) -> int | None:
+    """Return a usable service topic, replacing a known stale topic once."""
     global ESCALATION_TOPIC_ID
-    if ESCALATION_TOPIC_ID:
+
+    if ESCALATION_TOPIC_ID and (
+        stale_topic_id is None or ESCALATION_TOPIC_ID != stale_topic_id
+    ):
         return ESCALATION_TOPIC_ID
 
-    async with async_session_maker() as session:
-        setting = await session.scalar(
-            select(BotSetting).where(BotSetting.key == "ESCALATION_TOPIC_ID")
-        )
-        if setting:
-            ESCALATION_TOPIC_ID = int(setting.value)
+    async with escalation_topic_lock:
+        # Another notification may have recreated the topic while we waited.
+        if ESCALATION_TOPIC_ID and (
+            stale_topic_id is None or ESCALATION_TOPIC_ID != stale_topic_id
+        ):
             return ESCALATION_TOPIC_ID
 
-    try:
-        topic = await bot.create_forum_topic(
-            chat_id=SUPERGROUP_CHAT_ID, name="🔔 Эскалации"
-        )
-        ESCALATION_TOPIC_ID = topic.message_thread_id
-
         async with async_session_maker() as session:
-            session.add(
-                BotSetting(key="ESCALATION_TOPIC_ID", value=str(ESCALATION_TOPIC_ID))
+            setting = await session.scalar(
+                select(BotSetting).where(BotSetting.key == "ESCALATION_TOPIC_ID")
             )
-            await session.commit()
-            logger.info(f"ESCALATION_TOPIC_ID={ESCALATION_TOPIC_ID} сохранён в БД")
+            if setting:
+                try:
+                    stored_topic_id = int(setting.value)
+                except (TypeError, ValueError):
+                    stored_topic_id = None
+                if stored_topic_id and stored_topic_id != stale_topic_id:
+                    ESCALATION_TOPIC_ID = stored_topic_id
+                    return ESCALATION_TOPIC_ID
 
-        return ESCALATION_TOPIC_ID
+        if (
+            CONFIGURED_ESCALATION_TOPIC_ID
+            and CONFIGURED_ESCALATION_TOPIC_ID != stale_topic_id
+        ):
+            ESCALATION_TOPIC_ID = CONFIGURED_ESCALATION_TOPIC_ID
+            return ESCALATION_TOPIC_ID
+
+        if not SUPERGROUP_CHAT_ID:
+            logger.error("Не удалось создать тему эскалаций: SUPERGROUP_CHAT_ID не задан")
+            return None
+
+        try:
+            topic = await bot.create_forum_topic(
+                chat_id=SUPERGROUP_CHAT_ID, name="🔔 Эскалации"
+            )
+            ESCALATION_TOPIC_ID = topic.message_thread_id
+
+            async with async_session_maker() as session:
+                setting = await session.scalar(
+                    select(BotSetting).where(BotSetting.key == "ESCALATION_TOPIC_ID")
+                )
+                if setting:
+                    setting.value = str(ESCALATION_TOPIC_ID)
+                else:
+                    session.add(
+                        BotSetting(
+                            key="ESCALATION_TOPIC_ID",
+                            value=str(ESCALATION_TOPIC_ID),
+                        )
+                    )
+                await session.commit()
+            logger.info(f"ESCALATION_TOPIC_ID={ESCALATION_TOPIC_ID} сохранён в БД")
+            return ESCALATION_TOPIC_ID
+        except Exception as e:
+            logger.error(f"Не удалось создать тему эскалаций: {e}")
+            return None
+
+
+async def _send_to_service_topic(bot: Bot, text: str, log_label: str) -> bool:
+    """Send a service alert and recreate the topic once if it was deleted."""
+    topic_id = await get_or_create_escalation_topic(bot)
+    if not (topic_id and SUPERGROUP_CHAT_ID):
+        logger.error(
+            f"[{log_label}] Невозможно отправить: "
+            f"topic_id={topic_id}, SUPERGROUP_CHAT_ID={SUPERGROUP_CHAT_ID}"
+        )
+        return False
+
+    try:
+        await bot.send_message(
+            chat_id=SUPERGROUP_CHAT_ID,
+            text=text,
+            message_thread_id=topic_id,
+            parse_mode="HTML",
+        )
+        logger.info(f"[{log_label}] Уведомление отправлено в тему {topic_id}")
+        return True
+    except TelegramBadRequest as e:
+        if "message thread not found" not in str(e).lower():
+            logger.error(f"[{log_label}] Не удалось отправить уведомление: {e}")
+            return False
+        logger.warning(
+            f"[{log_label}] Тема {topic_id} больше не существует; создаю новую"
+        )
     except Exception as e:
-        logger.error(f"Не удалось создать тему эскалаций: {e}")
-        return None
+        logger.error(f"[{log_label}] Не удалось отправить уведомление: {e}")
+        return False
+
+    replacement_id = await get_or_create_escalation_topic(
+        bot,
+        stale_topic_id=topic_id,
+    )
+    if not replacement_id:
+        return False
+    try:
+        await bot.send_message(
+            chat_id=SUPERGROUP_CHAT_ID,
+            text=text,
+            message_thread_id=replacement_id,
+            parse_mode="HTML",
+        )
+        logger.info(
+            f"[{log_label}] Уведомление повторно отправлено в тему {replacement_id}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"[{log_label}] Повторная отправка не удалась: {e}")
+        return False
 
 
 async def _notify_escalation(
@@ -209,14 +304,6 @@ async def _notify_escalation(
 ) -> None:
     """Post a standardized escalation notification in the escalation topic."""
     logger.info(f"[Эскалация] Пользователь {rep.telegram_id}, причина: {reason}")
-    esc_topic_id = await get_or_create_escalation_topic(bot)
-    if not (esc_topic_id and SUPERGROUP_CHAT_ID):
-        logger.error(
-            f"[Эскалация] Невозможно отправить: "
-            f"esc_topic_id={esc_topic_id}, SUPERGROUP_CHAT_ID={SUPERGROUP_CHAT_ID}"
-        )
-        return
-
     admin_mention = (
         f'<a href="tg://user?id={ADMIN_TELEGRAM_ID}">администратора</a>'
         if ADMIN_TELEGRAM_ID
@@ -225,7 +312,7 @@ async def _notify_escalation(
     dialog_link = (
         f'📂 <a href="https://t.me/c/{str(SUPERGROUP_CHAT_ID)[4:]}/{admin_topic.topic_id}">'
         f'Перейти к диалогу</a>\n\n'
-        if admin_topic
+        if admin_topic and SUPERGROUP_CHAT_ID
         else ""
     )
     notif_text = replies.ESCALATION_NOTIF.format(
@@ -235,19 +322,87 @@ async def _notify_escalation(
         dialog_link=dialog_link,
         admin_mention=admin_mention,
     )
-    try:
-        await bot.send_message(
-            chat_id=SUPERGROUP_CHAT_ID,
-            text=notif_text,
-            message_thread_id=esc_topic_id,
-            parse_mode="HTML",
-        )
-        logger.info(f"[Эскалация] Уведомление отправлено в тему {esc_topic_id}")
-    except Exception as e:
-        logger.error(f"[Эскалация] Не удалось отправить уведомление: {e}")
+    await _send_to_service_topic(bot, notif_text, "Эскалация")
 
 
-GRATITUDE_PATTERN = re.compile(r"^\s*(спасибо|спс|благодарю|огромное спасибо|спасибо большое)\s*[!\.\)]*$", re.IGNORECASE)
+async def _notify_document_task(
+    bot: Bot,
+    rep: Representative,
+    details: str,
+    admin_topic: AdminTopic | None,
+) -> None:
+    """Notify managers about a Sheets task without pausing the client bot."""
+    logger.info(f"[Документы] Пользователь {rep.telegram_id}, задача: {details}")
+    admin_mention = (
+        f'<a href="tg://user?id={ADMIN_TELEGRAM_ID}">администратор</a>'
+        if ADMIN_TELEGRAM_ID
+        else "администратор"
+    )
+    dialog_link = (
+        f'📂 <a href="https://t.me/c/{str(SUPERGROUP_CHAT_ID)[4:]}/{admin_topic.topic_id}">'
+        f'Перейти к диалогу</a>\n\n'
+        if admin_topic and SUPERGROUP_CHAT_ID
+        else ""
+    )
+    notif_text = replies.DOCUMENT_TASK_NOTIF.format(
+        first_name=html.escape(rep.first_name or ""),
+        username=html.escape(rep.username or "нет"),
+        details=html.escape(details),
+        dialog_link=dialog_link,
+        admin_mention=admin_mention,
+    )
+    await _send_to_service_topic(bot, notif_text, "Документы")
+
+
+GRATITUDE_PATTERN = re.compile(
+    r"^\s*"
+    r"(?:(?:супер|отлично|понял|поняла|вс[её]\s+понятно|хорошо|класс|реально|от\s+души)"
+    r"[,!.:\s]+)?"
+    r"(?:"
+    r"спасибо(?:(?:\s+вам)?\s+(?:большое|огромное)|\s+вам)?"
+    r"(?:\s+за\s+(?:ответ|информацию|помощь))?"
+    r"(?:\s+от\s+души)?"
+    r"|(?:большое|огромное)(?:\s+вам)?\s+спасибо"
+    r"|благодарю(?:\s+вас)?"
+    r"|спс"
+    r")"
+    r"\s*[!.,):;\"'“”«»😊🙏🙂👍❤️❤]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_gratitude_only(text: str | None) -> bool:
+    """Return True only for a standalone thank-you, never for a real question."""
+    return bool(text and GRATITUDE_PATTERN.fullmatch(text))
+
+
+PLACEMENT_REQUEST_PATTERN = re.compile(
+    r"\b(?:размест\w*|опубликов\w*|публикац\w*|реклам\w*|пост\w*)\b",
+    re.IGNORECASE,
+)
+PROMOTIONAL_CONTENT_PATTERN = re.compile(
+    r"\b(?:программ\w*|курс\w*|мероприят\w*|вебинар\w*|конференц\w*|"
+    r"интенсив\w*|марафон\w*|школ\w*|проект\w*|набор\w*)\b",
+    re.IGNORECASE,
+)
+VACANCY_SIGNAL_PATTERN = re.compile(
+    r"\b(?:ваканси\w*|должност\w*|зарплат\w*|трудоустрой\w*|"
+    r"(?:услови|график)\w*\s+работ\w*|"
+    r"ищем\s+(?:кандидат\w*|сотрудник\w*|специалист\w*|"
+    r"преподавател\w*|менеджер\w*))\b",
+    re.IGNORECASE,
+)
+
+
+def is_non_vacancy_promotion(text: str | None) -> bool:
+    """Identify a request to promote a program/event, not a job vacancy."""
+    if not text:
+        return False
+    return bool(
+        PLACEMENT_REQUEST_PATTERN.search(text)
+        and PROMOTIONAL_CONTENT_PATTERN.search(text)
+        and not VACANCY_SIGNAL_PATTERN.search(text)
+    )
 
 @router.message(F.text.regexp(GRATITUDE_PATTERN), F.chat.type == "private")
 async def handle_gratitude(message: Message, bot: Bot):
@@ -276,39 +431,33 @@ async def handle_gratitude(message: Message, bot: Bot):
         )
         await session.commit()
 
-        # Send gratitude reply
-        await message.answer(replies.GRATITUDE)
+        # Mirror the client message first. In human/waiting mode the normal
+        # handler would keep the bot silent, so this fast path must do the same.
+        admin_topic = await session.scalar(
+            select(AdminTopic).where(AdminTopic.telegram_id == rep.telegram_id)
+        )
+        await _mirror_to_topic(
+            bot,
+            admin_topic,
+            replies.ADMIN_CLIENT_TEXT.format(text=html.escape(user_text)),
+        )
+        if admin_topic and admin_topic.status in {"waiting_human", "human_mode"}:
+            return
 
-        # Save bot response
+        await message.answer(replies.GRATITUDE)
         session.add(
             MessageHistory(
                 telegram_id=rep.telegram_id,
-                role="model",
+                role="assistant",
                 content=replies.GRATITUDE,
             )
         )
         await session.commit()
-
-        # Forward to admin topic
-        admin_topic = await session.scalar(
-            select(AdminTopic).where(AdminTopic.telegram_id == rep.telegram_id)
+        await _mirror_to_topic(
+            bot,
+            admin_topic,
+            replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GRATITUDE)),
         )
-        if admin_topic:
-            try:
-                await bot.send_message(
-                    chat_id=SUPERGROUP_CHAT_ID,
-                    text=replies.ADMIN_CLIENT_TEXT.format(text=html.escape(user_text)),
-                    message_thread_id=admin_topic.topic_id,
-                    parse_mode="HTML",
-                )
-                await bot.send_message(
-                    chat_id=SUPERGROUP_CHAT_ID,
-                    text=replies.ADMIN_BOT_REPLY.format(text=html.escape(replies.GRATITUDE)),
-                    message_thread_id=admin_topic.topic_id,
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.error(f"Failed to forward gratitude to admin topic: {e}")
 
 
 @router.message(CommandStart(), F.chat.type == "private")
@@ -343,7 +492,7 @@ async def handle_start_command(message: Message, bot: Bot):
         session.add(
             MessageHistory(
                 telegram_id=rep.telegram_id,
-                role="model",
+                role="assistant",
                 content=replies.GREETING,
             )
         )
@@ -503,6 +652,28 @@ async def user_private_message(message: Message, bot: Bot):
             # Bot stays silent in human mode.
             return
 
+        # High-confidence business rule: announcements about programs,
+        # courses and events are advertising, even when participation is free.
+        # This prevents words such as "бесплатно" and "стажировка" from
+        # incorrectly routing a promotional post to the vacancy form.
+        if is_non_vacancy_promotion(user_text):
+            reply_text = replies.FAQ_PAID_POST
+            session.add(
+                MessageHistory(
+                    telegram_id=rep.telegram_id,
+                    role="assistant",
+                    content=reply_text,
+                )
+            )
+            await session.commit()
+            await message.answer(reply_text)
+            await _mirror_to_topic(
+                bot,
+                admin_topic,
+                replies.ADMIN_BOT_REPLY.format(text=html.escape(reply_text)),
+            )
+            return
+
         async with user_llm_locks[rep.telegram_id]:
             history_query = await session.execute(
                 select(MessageHistory)
@@ -543,10 +714,19 @@ async def user_private_message(message: Message, bot: Bot):
                 "telegram_id": rep.telegram_id,
                 "first_name": rep.first_name,
                 "username": rep.username,
+                "dialog_link": (
+                    f"https://t.me/c/{str(SUPERGROUP_CHAT_ID)[4:]}/{admin_topic.topic_id}"
+                    if admin_topic and SUPERGROUP_CHAT_ID
+                    else ""
+                ),
             }
 
             try:
-                reply_text, handover_reason = await gemini_client.generate_response(
+                (
+                    reply_text,
+                    handover_reason,
+                    admin_notification,
+                ) = await gemini_client.generate_response(
                     gemini_history,
                     combined_user_text,
                     user_context=user_context,
@@ -563,7 +743,7 @@ async def user_private_message(message: Message, bot: Bot):
 
             if handover_reason is not None:
                 # Handover — fixed canonical reply, escalate in admin group.
-                final_reply = replies.HANDOVER_CLIENT
+                final_reply = reply_text or replies.HANDOVER_CLIENT
                 if admin_topic:
                     admin_topic.status = "waiting_human"
 
@@ -606,6 +786,13 @@ async def user_private_message(message: Message, bot: Bot):
                 admin_topic,
                 replies.ADMIN_BOT_REPLY.format(text=html.escape(reply_text)),
             )
+            if admin_notification:
+                await _notify_document_task(
+                    bot,
+                    rep,
+                    admin_notification,
+                    admin_topic,
+                )
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))

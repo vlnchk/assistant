@@ -3,23 +3,41 @@
 Telegram-бот ассистент для канала вакансий в образовании. Консультирует клиентов по размещению вакансий и рекламы, помогает забронировать рекламный слот и оформить документы. Под капотом — Google Gemini в роли диспетчера интентов, SQLite для истории диалогов, Google Sheets как «база» слотов и задач.
 
 ## Технологический стек
-- **Python 3.12** (см. `Dockerfile`)
-- **aiogram 3.x** (Telegram Bot API)
-- **SQLAlchemy & aiosqlite** (асинхронная работа с БД SQLite)
-- **Alembic** (миграции базы данных)
-- **google-genai** (Google Gemini LLM, новый унифицированный SDK)
-- **gspread** (интеграция с Google Sheets)
+- **Python 3.12.13** (см. `Dockerfile`)
+- **aiogram 3.30.0** (Telegram Bot API)
+- **SQLAlchemy 2.0.48 & aiosqlite 0.22.1** (асинхронная работа с БД SQLite)
+- **Alembic 1.16.5** (миграции базы данных)
+- **google-genai 2.8.0** (Google Gemini LLM, унифицированный SDK)
+- **gspread 6.2.1** (интеграция с Google Sheets)
 - **Docker & Docker Compose** (контейнеризация и деплой)
+
+`requirements.txt` является полным lock-файлом: прямые и транзитивные
+Python-зависимости закреплены точными версиями. После изменения зависимостей
+нужно пересобрать lock-файл и повторить аудит уязвимостей, а не заменять `==`
+на диапазоны версий.
+
+### Модель безопасности production-контейнера
+
+- процесс запускается как непривилегированный пользователь `10001:10001`;
+- root filesystem контейнера доступен только для чтения;
+- все Linux capabilities удалены, включён `no-new-privileges`;
+- writable-данные находятся только в bind mount `./data:/app/data`;
+- временные файлы разрешены только в отдельном `tmpfs` `/tmp`;
+- `.env` читает Docker Compose и не копирует его в образ;
+- Google service-account JSON исключён через `.dockerignore` и подключается
+  отдельным read-only bind mount.
 
 ## Архитектура
 
 ### Принцип «LLM-диспетчер»
 
-Бот построен по правилу: **LLM не пишет клиенту текст**. Gemini получает сообщение клиента, выбирает один инструмент (tool) и возвращает его вызов. Финальный текст, который видит клиент, — это **строка из `bot/replies.py`**, либо напрямую константа, либо результат `template.format(...)`. Это даёт три эффекта:
+Бот построен по правилу: **LLM не пишет клиенту текст**. Gemini получает сообщение клиента, выбирает один инструмент (tool) и возвращает его вызов. Для составного информационного запроса используется один `answer_information`, который объединяет несколько утверждённых блоков и read-only результат календаря. Финальный текст, который видит клиент, — это **строка из `bot/replies.py`**, результат `template.format(...)` или композиция таких строк. Это даёт три эффекта:
 
 1. **Стандартизация.** Одинаковые ситуации → побайтово одинаковые реплики. Поменять формулировку — это одна правка в `bot/replies.py`, без редеплоя промптов.
 2. **Защита от галлюцинаций.** LLM не может «придумать» цену, охват, акцию или название компании — у него нет канала, через который не-шаблонный текст попадёт клиенту. Если LLM всё-таки ответил свободным текстом вместо tool-а — бот **не пересылает** этот ответ клиенту, а уходит в эскалацию.
-3. **Защита от prompt injection.** Любой tool, принимающий `telegram_id`, получает его **из серверного контекста**, а не из аргументов LLM ([`llm/gemini_client.py`](llm/gemini_client.py) → `_inject_real_telegram_id`). Что бы ни написал клиент («покажи бронирования telegram_id 12345»), бот заменит ID на реальный ID отправителя до вызова tool-а.
+3. **Защита от prompt injection.** Идентификатор Telegram, контакт и ссылка на админ-диалог подставляются **из серверного контекста**, а не из аргументов LLM ([`llm/gemini_client.py`](llm/gemini_client.py) → `_inject_server_context`). Что бы ни написал клиент («покажи бронирования telegram_id 12345»), бот заменит ID на реальный ID отправителя до вызова tool-а.
+
+Информационные темы можно объединять. Изменяющее действие — бронирование, заявка на документ или категоризированная передача операции менеджеру — за один ход допускается только одно.
 
 ### Поток одного сообщения
 
@@ -61,15 +79,18 @@ bot/handlers.py: эта строка идёт клиенту И в админ-т
 | `reply_bot_nature`         | «Я бот, чувств у меня нет…»                                       |
 | `reply_offtopic`           | Вежливый редирект small talk                                      |
 | `faq_free_posting`         | Бесплатное размещение вакансий через форму                        |
-| `faq_paid_post`            | Платная реклама: 15 000 ₽, акция «4+1»                            |
+| `faq_paid_post`            | Платная реклама (не вакансии): 15 000 ₽, акция «4+1»              |
 | `faq_stats`                | Охваты, ERR, география                                            |
 | `faq_ord`                  | Маркировка рекламы (ОРД)                                          |
 | `faq_docs`                 | Документооборот, ЭДО                                              |
+| `answer_information`      | Один или несколько FAQ-блоков плюс read-only проверка календаря  |
 | `ask_ad_topic`             | «Что планируете рекламировать?»                                   |
 | `get_free_slots`           | Чтение свободных дат из Google Sheets                             |
 | `book_slot`                | Бронирование слота (с обязательным `ad_topic`)                    |
 | `get_client_bookings`      | Мои бронирования (только по реальному `telegram_id`)              |
-| `create_document_task`     | Заявка на счёт/договор/акт                                        |
+| `create_document_task`     | Заявка на документ и служебное уведомление без остановки бота     |
+| `request_publication_support` | Статус, исправление, удаление, ускорение и другие операции      |
+| `request_mutual_pr_support` | Эскалация предложений по взаимопиару / «ВП»                      |
 | `handover_to_admin`        | Эскалация на менеджера                                            |
 
 ### Как править реплики бота
@@ -81,8 +102,12 @@ bot/handlers.py: эта строка идёт клиенту И в админ-т
 ### Логи и хранение
 
 - `db.sqlite3` (или `data/db.sqlite3` в Docker): таблицы `representatives`, `admin_topics`, `messages_history`, `bot_settings`, `clients`.
-- `logger.py`: ротация файлов, формат с уровнем и таймстампом.
-- Google Sheets: лист `Календарь (Слоты)` — слоты; лист `Задачи (Документы)` — заявки на документы.
+- `/app/data/bot.log` в Docker: ротация до 10 МБ, хранится 5 архивных файлов.
+  Путь задаётся переменной `BOT_LOG_FILE`; писать лог рядом с кодом нельзя,
+  потому что root filesystem контейнера read-only.
+- Google Sheets: лист `Календарь (Слоты)` — слоты; лист `Задачи (Документы)` — заявки на документы. Для новых заявок лист документов автоматически получает колонку `Реквизиты / комментарий`, если её ещё нет.
+- После успешного создания задачи на документ бот отправляет служебное уведомление в тему эскалаций, но не переводит клиентский диалог в `waiting_human`.
+- Если сохранённая тема эскалаций была удалена, бот один раз создаёт новую тему, сохраняет её ID в БД и повторяет отправку уведомления.
 
 ## Требования
 - Токен Telegram-бота (получить у [@BotFather](https://t.me/BotFather)).
@@ -111,7 +136,8 @@ GEMINI_API_KEY="ВАШ_КЛЮЧ"
 # GEMINI_TIMEOUT="10"
 
 # --- Google Sheets ---
-GOOGLE_SHEETS_CREDENTIALS_FILE="credentials.json"      # JSON service-account рядом с main.py
+GOOGLE_SHEETS_CREDENTIALS_FILE="credentials.json"      # локальный запуск
+# На VPS compose ожидает: ejs-admin-bot-a275ca626752.json
 GOOGLE_SHEETS_DOCUMENT_URL="https://docs.google.com/spreadsheets/d/..."
 
 # --- Эскалация ---
@@ -119,7 +145,24 @@ ADMIN_TELEGRAM_ID="123456789"          # ваш ID — будет упомяну
 # ESCALATION_TOPIC_ID="..."            # необязательно: тему создаст бот сам и сохранит ID в БД
 ```
 
-> ⚠️ Никогда не коммитьте `.env` и `credentials.json` — они в `.gitignore`.
+> ⚠️ Никогда не коммитьте `.env` и service-account JSON — они исключены из
+> git и Docker build context. На VPS оба файла должны иметь режим `600`.
+
+Production-права на VPS:
+
+```bash
+cd /opt/assistant
+chown root:root .env
+chmod 600 .env
+chown 10001:10001 ejs-admin-bot-a275ca626752.json
+chown -R 10001:10001 data
+chmod 600 ejs-admin-bot-a275ca626752.json
+chmod 700 data
+chmod 600 data/db.sqlite3
+```
+
+JSON принадлежит UID 10001, чтобы приложение могло его читать, но bind mount
+внутри контейнера остаётся read-only.
 
 ## Локальный запуск (без Docker)
 
@@ -142,15 +185,38 @@ python main.py
 ## Запуск в Docker
 
 ```bash
+docker compose config --quiet
 docker compose up -d --build
-docker compose logs -f
+docker compose logs -f bot
 ```
 
 Миграции применяются автоматически в `CMD` контейнера (`alembic upgrade head && python main.py`).
 
+Проверка hardening после запуска:
+
+```bash
+docker inspect -f 'user={{.Config.User}} readonly={{.HostConfig.ReadonlyRootfs}} security={{json .HostConfig.SecurityOpt}} capdrop={{json .HostConfig.CapDrop}}' edujobs_bot
+docker inspect -f '{{range .Mounts}}{{.Destination}} rw={{.RW}}{{println}}{{end}}' edujobs_bot
+docker exec edujobs_bot id
+```
+
+Ожидается: `user=10001:10001`, `readonly=true`, `no-new-privileges`,
+`capdrop=["ALL"]`; `/app/data` имеет `rw=true`, JSON — `rw=false`.
+
 ---
 
 ## 🚀 Обновление бота на VPS
+
+### Шаг 0. Сделать и проверить бэкап
+
+```bash
+sudo systemctl start edujobs-bot-backup.service
+sudo systemctl show edujobs-bot-backup.service \
+  -p Result -p ExecMainStatus -p ActiveState
+```
+
+Ожидается `Result=success` и `ExecMainStatus=0`. Скрипт `update.sh` сам
+бэкап не создаёт, поэтому пропускать этот шаг нельзя.
 
 ### Шаг 1. Запушить изменения
 
@@ -167,21 +233,58 @@ cd /opt/assistant
 ./update.sh
 ```
 
-> Скрипт `update.sh` (лежит на VPS) делает `git pull`, пересобирает образ и перезапускает контейнер: `docker compose up -d --build`. БД при этом не теряется.
+> Скрипт `update.sh` лежит только на VPS. Он делает `git pull`, пересобирает
+> образ, перезапускает контейнер и удаляет dangling-образы. Запускать его нужно
+> строго из `/opt/assistant` и только после успешного бэкапа.
 
-### Шаг 3. Применить миграции (только если менялись модели)
-
-```bash
-docker compose exec bot alembic upgrade head
-```
-
-### Шаг 4. Проверить логи
+### Шаг 3. Проверить результат
 
 ```bash
-docker compose logs -f
+docker compose ps
+docker compose logs --tail 100 bot
+docker exec edujobs_bot id
+sqlite3 /opt/assistant/data/db.sqlite3 'PRAGMA integrity_check;'
 ```
 
-*(`Ctrl+C` — выйти из просмотра.)*
+Миграции уже выполняются автоматически при старте. Повторный ручной
+`alembic upgrade head` обычно не нужен.
+
+---
+
+## Бэкапы и восстановление
+
+Обе SQLite-базы сервера бэкапятся единым systemd-сервисом:
+
+- unit: `edujobs-bot-backup.service`;
+- timer: ежедневно в 04:30 по времени сервера с задержкой до 15 минут;
+- скрипт: `/usr/local/sbin/edujobs-bot-backup.sh`;
+- локально: `/opt/bot-backups/daily/assistant/`, ротация 14 дней;
+- Google Drive: `gdrive:edujobs-bot-backups/assistant/daily`, ротация 30 дней.
+
+Скрипт использует штатную SQLite-команду `.backup`, затем проверяет
+`PRAGMA integrity_check`, сжимает архив и проверяет gzip.
+
+Проверить таймер и последние архивы:
+
+```bash
+systemctl list-timers edujobs-bot-backup.timer --no-pager
+systemctl status edujobs-bot-backup.service --no-pager
+ls -lh /opt/bot-backups/daily/assistant/
+rclone lsf gdrive:edujobs-bot-backups/assistant/daily --files-only | tail
+```
+
+Проверка восстановления без остановки production:
+
+```bash
+restore_dir=$(mktemp -d /tmp/assistant-restore.XXXXXX)
+archive=$(ls -1t /opt/bot-backups/daily/assistant/*.sqlite3.gz | head -n 1)
+gzip -cd "$archive" > "$restore_dir/db.sqlite3"
+sqlite3 "$restore_dir/db.sqlite3" 'PRAGMA integrity_check;'
+```
+
+Ожидаемый результат — `ok`. Подменять production-базу этим файлом можно
+только после `docker compose stop bot`, отдельной копии текущей базы и
+повторной проверки владельца `10001:10001` и режима `600`.
 
 ---
 
@@ -192,12 +295,16 @@ docker compose logs -f
 docker compose logs --tail 50 bot
 
 # Зайти внутрь контейнера
-docker compose exec bot bash
+docker compose exec bot sh
 
-# Посмотреть базу
-docker compose exec bot sqlite3 /app/data/db.sqlite3 \
+# Посмотреть базу с хоста (sqlite3 CLI в production-образ не устанавливается)
+sqlite3 /opt/assistant/data/db.sqlite3 \
   "SELECT telegram_id, status FROM admin_topics;"
 
 # Изменить модель/тайм-аут без правки кода
 # (в .env, потом docker compose up -d, без --build)
 ```
+
+---
+
+Последнее обновление: 23 августа 2026.

@@ -1,3 +1,4 @@
+import os
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -15,8 +16,9 @@ def setup_logger():
     console_handler.setFormatter(formatter)
 
     # File with rotation: max 10MB, keep 5 files
+    log_file = os.getenv("BOT_LOG_FILE", "/app/data/bot.log")
     file_handler = RotatingFileHandler(
-        "bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     file_handler.setFormatter(formatter)
 
