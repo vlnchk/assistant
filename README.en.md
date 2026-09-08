@@ -124,6 +124,7 @@ metadata; client-facing Russian text lives in `bot/replies.py`.
 | `faq_ord` | Advertising labelling and ORD |
 | `faq_docs` | Contracts, invoices, EDI, and document workflow |
 | `answer_information` | One or more canonical FAQ blocks, optionally including read-only calendar data |
+| `ask_placement_type` | Clarify "vacancy or promotional post?" on a general question about terms |
 | `ask_ad_topic` | Request the subject of an advertisement |
 | `get_free_slots` | Read available dates from Google Sheets |
 | `check_dates_availability` | Check one or more requested dates |

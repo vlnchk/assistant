@@ -228,6 +228,31 @@ def answer_information(
     return "\n\n".join(dict.fromkeys(blocks))
 
 
+def ask_placement_type() -> str:
+    """
+    Ask whether the client means a job vacancy or a promotional post.
+
+    Use ONLY for a general question about terms, conditions or price in which
+    the client names NO product at all and the dialogue has not established one
+    yet, e.g. "Какие условия размещения?", "Расскажите про условия",
+    "Сколько у вас стоит?", "Что по прайсу?". The two products differ in price
+    by five times, so quoting both at once reads as a contradiction.
+
+    NEVER use this tool when the product is already identifiable:
+      - "вакансия", a job title, hiring an employee → the vacancy tools;
+      - "реклама", "рекламный пост", "промопост", "пост", "анонс", or a
+        course / program / event announcement → faq_paid_post;
+      - a comparison of free and paid vacancy placement, or a question about
+        both products at once → answer_information;
+      - a question about a specific topic — reach, ОРД, documents, formats,
+        free dates, moderation → the corresponding tool.
+
+    Ask at most once per dialogue: as soon as the client names the product,
+    route to the real tool instead of clarifying again.
+    """
+    return replies.ASK_PLACEMENT_TYPE
+
+
 def ask_ad_topic() -> str:
     """
     Politely ask the client what they plan to advertise. Use BEFORE calling
@@ -504,6 +529,7 @@ TERMINAL_TOOLS = {
     "faq_ord",
     "faq_docs",
     "answer_information",
+    "ask_placement_type",
     "ask_ad_topic",
     "book_slot",
     "get_free_slots",
@@ -525,6 +551,7 @@ bot_tools = [
     faq_ord,
     faq_docs,
     answer_information,
+    ask_placement_type,
     ask_ad_topic,
     get_free_slots,
     check_dates_availability,
