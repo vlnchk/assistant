@@ -1,0 +1,290 @@
+{
+ "_": "Что модель делает СЕГОДНЯ. Регресс и починка одинаково видны как git diff. Не править руками.",
+ "_как_обновить": "Прогнать полный датасет и пересобрать: см. dev/ROADMAP.md, раздел «Как обновлять baseline».",
+ "снято": "2026-09-21",
+ "модель": "gemini-3.5-flash-lite",
+ "датасет": "tests/fixtures/dialog_cases.jsonl",
+ "итоги": {
+  "ходов": 100,
+  "зелёных": 92,
+  "красных": 8,
+  "ошибок": 0,
+  "латентность_p95_мс": 1190.47
+ },
+ "маршруты": {
+  "standalone_gratitude": [
+   "reply_gratitude"
+  ],
+  "gratitude_with_question": [
+   "get_free_slots"
+  ],
+  "paid_program_promotion": [
+   "faq_paid_post"
+  ],
+  "real_vacancy": [
+   "faq_free_posting"
+  ],
+  "advertising_price": [
+   "faq_paid_post"
+  ],
+  "composite_faq": [
+   "answer_information"
+  ],
+  "manager_request": [
+   "handover_to_admin"
+  ],
+  "document_dialog": [
+   "create_document_task",
+   "create_document_task"
+  ],
+  "mutual_pr": [
+   "request_mutual_pr_support"
+  ],
+  "complex_two_actions": [
+   "handover_to_admin"
+  ],
+  "real_001_greeting": [
+   "send_greeting"
+  ],
+  "real_002_connection_check": [
+   "reply_offtopic"
+  ],
+  "real_003_how_are_you": [
+   "reply_offtopic"
+  ],
+  "real_004_reception": [
+   "send_greeting"
+  ],
+  "real_005_free_advertising": [
+   "answer_information"
+  ],
+  "real_006_ad_price_typo": [
+   "faq_paid_post"
+  ],
+  "real_007_ad_price_short": [
+   "faq_paid_post"
+  ],
+  "real_008_ad_overview": [
+   "faq_paid_post"
+  ],
+  "real_009_ad_price_and_slots": [
+   "answer_information"
+  ],
+  "real_010_composite_performance": [
+   "answer_information"
+  ],
+  "real_011_payment_and_slots": [
+   "answer_information"
+  ],
+  "real_012_channel_stats": [
+   "faq_stats"
+  ],
+  "real_013_ad_performance": [
+   "answer_information"
+  ],
+  "real_014_ord": [
+   "faq_ord"
+  ],
+  "real_015_free_seminar_promotion": [
+   "faq_paid_post"
+  ],
+  "real_016_free_webinars": [
+   "faq_paid_post"
+  ],
+  "real_017_charity_program": [
+   "faq_paid_post"
+  ],
+  "real_017b_charity_program_verbatim": [
+   "send_greeting",
+   "faq_paid_post"
+  ],
+  "real_018_course_vacancy": [
+   "faq_free_posting"
+  ],
+  "real_019_place_vacancy": [
+   "faq_free_posting"
+  ],
+  "real_020_find_candidates": [
+   "faq_free_posting"
+  ],
+  "real_021_vacancy_price": [
+   "answer_information"
+  ],
+  "real_022_ad_vs_vacancy": [
+   "answer_information"
+  ],
+  "real_023_find_job": [
+   "answer_information"
+  ],
+  "real_024_view_jobs": [
+   "answer_information"
+  ],
+  "real_025_post_cv": [
+   "answer_information"
+  ],
+  "real_026_moderation_time": [
+   "answer_information"
+  ],
+  "real_027_publication_status": [
+   "request_publication_support"
+  ],
+  "real_028_edit_publication": [
+   "request_publication_support"
+  ],
+  "real_029_expedite_publication": [
+   "request_publication_support"
+  ],
+  "real_030_convert_to_paid": [
+   "request_publication_support"
+  ],
+  "real_031_mutual_pr": [
+   "request_mutual_pr_support"
+  ],
+  "real_032_cpa_partnership": [
+   "answer_information"
+  ],
+  "real_033_manager_request": [
+   "handover_to_admin"
+  ],
+  "real_034_forbidden_raffle": [
+   "handover_to_admin"
+  ],
+  "real_035_forbidden_scam": [
+   "handover_to_admin"
+  ],
+  "real_036_free_slots": [
+   "get_free_slots"
+  ],
+  "real_037_specific_date": [
+   "check_dates_availability"
+  ],
+  "real_038_date_range": [
+   "check_dates_availability"
+  ],
+  "real_039_publication_time": [
+   "answer_information"
+  ],
+  "real_040_ad_formats": [
+   "answer_information"
+  ],
+  "real_041_docs_faq": [
+   "answer_information"
+  ],
+  "real_042_document_task": [
+   "create_document_task",
+   "create_document_task"
+  ],
+  "real_043_delete_publication": [
+   "request_publication_support"
+  ],
+  "real_044_broken_form": [
+   "faq_free_posting",
+   "request_publication_support"
+  ],
+  "real_045_praise_plus_price": [
+   "faq_paid_post"
+  ],
+  "real_046_gratitude": [
+   "reply_gratitude"
+  ],
+  "real_047_long_gratitude": [
+   "reply_gratitude"
+  ],
+  "real_048_ad_conditions": [
+   "faq_paid_post"
+  ],
+  "real_049_discount_request": [
+   "handover_to_admin"
+  ],
+  "real_050_booking_flow": [
+   "faq_paid_post",
+   "get_free_slots",
+   "get_free_slots",
+   "answer_information"
+  ],
+  "real_051_booking_confirmation": [
+   "answer_information",
+   "book_slot"
+  ],
+  "real_052_channel_and_marking": [
+   "answer_information"
+  ],
+  "real_053_paid_vacancy_and_ord": [
+   "answer_information",
+   "faq_ord"
+  ],
+  "real_054_approval_status": [
+   "request_publication_support"
+  ],
+  "real_055_payment_usdt": [
+   "handover_to_admin"
+  ],
+  "placement_type_general_conditions": [
+   "ask_placement_type"
+  ],
+  "placement_type_tell_about_conditions": [
+   "ask_placement_type"
+  ],
+  "placement_type_how_much": [
+   "ask_placement_type"
+  ],
+  "placement_type_answered_vacancy": [
+   "ask_placement_type",
+   "answer_information"
+  ],
+  "placement_type_answered_ad": [
+   "ask_placement_type",
+   "faq_paid_post"
+  ],
+  "placement_type_no_regress_vacancy": [
+   "faq_free_posting"
+  ],
+  "placement_type_no_regress_paid_post": [
+   "faq_paid_post"
+  ],
+  "placement_type_no_regress_vacancy_options": [
+   "answer_information"
+  ],
+  "placement_type_no_regress_both_products": [
+   "answer_information"
+  ],
+  "paid_post_names_the_product": [
+   "faq_paid_post"
+  ],
+  "paid_vacancy_funnel_target": [
+   "faq_free_posting",
+   "answer_information",
+   "get_free_slots",
+   "get_free_slots"
+  ],
+  "paid_vacancy_never_books_slot": [
+   "faq_free_posting",
+   "answer_information",
+   "get_free_slots",
+   "ask_ad_topic"
+  ],
+  "vacancy_bare_word_two_options": [
+   "faq_free_posting"
+  ],
+  "vacancy_how_to_post_two_options": [
+   "faq_free_posting"
+  ],
+  "vacancy_want_to_post_two_options": [
+   "faq_free_posting"
+  ],
+  "ad_yes_still_shows_calendar": [
+   "faq_paid_post",
+   "get_free_slots"
+  ]
+ },
+ "красные_кейсы": {
+  "_": "Красные намеренно: фиксируют целевое поведение до его реализации. Их маршруты обязаны измениться на M2 и M3, остальные — нет.",
+  "кейсы": [
+   "paid_vacancy_funnel_target",
+   "paid_vacancy_never_books_slot",
+   "vacancy_bare_word_two_options",
+   "vacancy_how_to_post_two_options",
+   "vacancy_want_to_post_two_options"
+  ]
+ }
+}

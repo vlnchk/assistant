@@ -21,4 +21,7 @@ eval_runs/
 
 # Конфиги и секреты
 .env
+# Блокет: в корне лежат service-account ключи Google. Из-за него молча
+# терялись легитимные JSON — ниже исключения для них.
 *.json
+!dev/eval_baseline.json
