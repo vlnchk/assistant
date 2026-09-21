@@ -34,6 +34,7 @@ from llm.tools import (
     reply_gratitude,
     reply_offtopic,
     request_mutual_pr_support,
+    request_paid_vacancy,
     request_publication_support,
     send_greeting,
 )
@@ -62,8 +63,109 @@ TOOL_FUNCTIONS: dict[str, ToolFunction] = {
     "create_document_task": create_document_task,
     "request_publication_support": request_publication_support,
     "request_mutual_pr_support": request_mutual_pr_support,
+    "request_paid_vacancy": request_paid_vacancy,
     "handover_to_admin": handover_to_admin,
 }
+
+
+# ---------------------------------------------------------------------------
+# Product guard (ADR-0005)
+# ---------------------------------------------------------------------------
+#
+# Календарь слотов — только для рекламы. Когда в диалоге уже установлено, что
+# речь о вакансии, роутеру физически нечего предложить на «давайте платно»
+# кроме рекламной воронки, и он туда уходит — детерминированно, 3/3 прогонов
+# (dev/findings/2026-09-17-paid-vacancy-funnel.md).
+#
+# Правило живёт в коде, а не в промпте, сознательно: правило в промпте нельзя
+# покрыть юнит-тестом и оно конкурирует с соседними правилами.
+#
+# Продукт определяется по КАНОНИЧЕСКИМ репликам самого бота — это закрытое
+# множество строк из bot/replies.py, а не свободный текст клиента, поэтому
+# проверка детерминированная. Маркеры сверяются с константами тестом
+# tests/test_paid_vacancy.py::ProductMarkerTests.
+
+AD_MARKER = "Рекламный (промо) пост"
+VACANCY_MARKERS = (
+    "два варианта размещения вакансии",
+    "оформим платное размещение",
+)
+
+CALENDAR_TOOLS = frozenset(
+    {"get_free_slots", "check_dates_availability", "book_slot", "ask_ad_topic"}
+)
+
+
+def detect_product(history: list[dict[str, Any]] | None) -> str | None:
+    """Return "ad", "vacancy" or None from the bot's own canonical replies.
+
+    Scans backwards: the most recent product signal wins, so a client who
+    switches from vacancy to advertising is not stuck in the vacancy branch.
+    """
+    for item in reversed(history or []):
+        if str(item.get("role") or "") not in {"assistant", "model"}:
+            continue
+        text = str(item.get("content") or "")
+        if AD_MARKER in text:
+            return "ad"
+        if any(marker in text for marker in VACANCY_MARKERS):
+            return "vacancy"
+    return None
+
+
+def _options_were_shown(history: list[dict[str, Any]] | None) -> bool:
+    """Did the bot already name both vacancy options, price included?"""
+    return any(
+        VACANCY_MARKERS[0] in str(item.get("content") or "")
+        for item in history or []
+        if str(item.get("role") or "") in {"assistant", "model"}
+    )
+
+
+def apply_product_guard(
+    tool_name: str,
+    args: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+) -> tuple[str, dict[str, Any]]:
+    """Keep a vacancy dialogue out of the advertising calendar."""
+    # Клиент не может согласиться на вариант, которого ему не назвали.
+    # Пока обе опции с ценой не прозвучали, «нужно платно» — это просьба
+    # рассказать про платный вариант, а не согласие: сначала опции, потом
+    # сбор текста. После ADR-0004 опции звучат уже на первом ходу, и это
+    # правило само перестаёт срабатывать.
+    if tool_name == "request_paid_vacancy" and not _options_were_shown(history):
+        return "answer_information", {"topics": ["vacancy_options"]}
+
+    if detect_product(history) != "vacancy":
+        return tool_name, args
+
+    if tool_name in CALENDAR_TOOLS:
+        return "request_paid_vacancy", {}
+
+    if tool_name != "answer_information":
+        return tool_name, args
+
+    # answer_information может тянуть даты вместе с информационными темами.
+    # Убираем календарную часть, но сам ответ сохраняем — клиент спрашивал
+    # ещё и по делу. Если кроме дат не осталось ничего, это был вопрос про
+    # календарь, и он уходит в ту же эскалацию.
+    topics = [
+        str(topic).strip().lower()
+        for topic in (args.get("topics") or [])
+        if str(topic).strip().lower() != "free_slots"
+    ]
+    wants_calendar = (
+        len(topics) != len(args.get("topics") or [])
+        or args.get("month")
+        or args.get("dates")
+    )
+    if not wants_calendar:
+        return tool_name, args
+    if not topics:
+        return "request_paid_vacancy", {}
+    cleaned = {key: value for key, value in args.items() if key not in {"month", "dates"}}
+    cleaned["topics"] = topics
+    return tool_name, cleaned
 
 
 class ToolCallError(Exception):

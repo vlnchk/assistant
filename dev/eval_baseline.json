@@ -1,7 +1,7 @@
 {
  "_": "Что модель делает СЕГОДНЯ. Регресс и починка одинаково видны как git diff. Не править руками.",
  "_как_обновить": "Прогнать полный датасет и пересобрать: см. dev/ROADMAP.md, раздел «Как обновлять baseline».",
- "снято": "2026-09-21",
+ "снято": "2026-09-21 (базовый прогон), 2026-09-22 (перемерены кейсы M2)",
  "модель": "gemini-3.5-flash-lite",
  "датасет": "tests/fixtures/dialog_cases.jsonl",
  "итоги": {
@@ -211,7 +211,7 @@
   ],
   "real_053_paid_vacancy_and_ord": [
    "answer_information",
-   "faq_ord"
+   "answer_information"
   ],
   "real_054_approval_status": [
    "request_publication_support"
@@ -254,14 +254,14 @@
   "paid_vacancy_funnel_target": [
    "faq_free_posting",
    "answer_information",
-   "get_free_slots",
-   "get_free_slots"
+   "request_paid_vacancy",
+   "request_paid_vacancy"
   ],
   "paid_vacancy_never_books_slot": [
    "faq_free_posting",
    "answer_information",
-   "get_free_slots",
-   "ask_ad_topic"
+   "request_paid_vacancy",
+   "request_paid_vacancy"
   ],
   "vacancy_bare_word_two_options": [
    "faq_free_posting"
@@ -278,13 +278,13 @@
   ]
  },
  "красные_кейсы": {
-  "_": "Красные намеренно: фиксируют целевое поведение до его реализации. Их маршруты обязаны измениться на M2 и M3, остальные — нет.",
+  "_": "Красные намеренно: фиксируют целевое поведение до его реализации. Оставшиеся зеленеют на M3 (ADR-0004).",
   "кейсы": [
    "paid_vacancy_funnel_target",
-   "paid_vacancy_never_books_slot",
    "vacancy_bare_word_two_options",
    "vacancy_how_to_post_two_options",
    "vacancy_want_to_post_two_options"
   ]
- }
+ },
+ "_оговорка": "Часть кейсов допускает несколько равноправных маршрутов (expected_tools). Такой кейс может менять запись между прогонами, оставаясь зелёным — это не регресс."
 }

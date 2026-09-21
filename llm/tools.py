@@ -476,6 +476,35 @@ def request_publication_support(
     return _handover_with_reply(reason, client_reply)
 
 
+def request_paid_vacancy(vacancy_text: str = "") -> str:
+    """
+    Hand a PAID vacancy placement to a manager.
+
+    Use as soon as the client chooses the paid option for a VACANCY:
+    "давайте платно", "нужна платная вакансия", "беру платный вариант",
+    "хочу разместить вакансию платно".
+
+    A paid vacancy NEVER takes a calendar slot — the slot calendar is for
+    advertising only. Never call get_free_slots, check_dates_availability,
+    book_slot or ask_ad_topic for a vacancy, even if the client names a date.
+
+    Never quote a final price: "от 3 000 ₽" is the only figure the bot says,
+    the manager confirms the rest.
+
+    Args:
+        vacancy_text: The vacancy text if the client has already sent it.
+            Pass it verbatim, never invent it. When empty, the tool asks the
+            client for the text and does not escalate yet.
+    """
+    vacancy_text = str(vacancy_text or "").strip()
+    if not vacancy_text:
+        return replies.PAID_VACANCY_NEED_TEXT
+    return _handover_with_reply(
+        f"платное размещение вакансии; текст: {vacancy_text[:1500]}",
+        replies.PAID_VACANCY_HANDOVER,
+    )
+
+
 def request_mutual_pr_support() -> str:
     """
     Hand a mutual-promotion proposal to a manager.
@@ -538,6 +567,7 @@ TERMINAL_TOOLS = {
     "create_document_task",
     "request_publication_support",
     "request_mutual_pr_support",
+    "request_paid_vacancy",
 }
 
 bot_tools = [
@@ -560,5 +590,6 @@ bot_tools = [
     create_document_task,
     request_publication_support,
     request_mutual_pr_support,
+    request_paid_vacancy,
     handover_to_admin,
 ]

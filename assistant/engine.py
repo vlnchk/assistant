@@ -9,7 +9,11 @@ from typing import Any
 
 from assistant.models import RouteDecision, TurnRequest, TurnResult, TurnTrace
 from llm.gemini_client import MODEL_NAME, gemini_client
-from llm.tool_executor import ProductionToolExecutor, ToolCallError
+from llm.tool_executor import (
+    ProductionToolExecutor,
+    ToolCallError,
+    apply_product_guard,
+)
 from logger import logger
 
 
@@ -89,6 +93,7 @@ class AssistantEngine:
         final_decision = await self._route(request)
         trace.routes.append(final_decision)
         trace.model_path.append(MODEL_NAME)
+        self._guard(final_decision, request)
         prepared_args, preparation_error = self._prepare(
             final_decision,
             request.user_context,
@@ -147,6 +152,29 @@ class AssistantEngine:
         )
         self._log_trace(result)
         return result
+
+    @staticmethod
+    def _guard(decision: RouteDecision, request: TurnRequest) -> None:
+        """Override a route the dialogue's product forbids (ADR-0005).
+
+        Deterministic and server-side on purpose: a rule in the system prompt
+        cannot be unit-tested and competes with the neighbouring rules.
+        """
+        if decision.error or not decision.tool_name:
+            return
+        guarded_name, guarded_args = apply_product_guard(
+            decision.tool_name,
+            decision.arguments,
+            request.history,
+        )
+        if guarded_name == decision.tool_name and guarded_args == decision.arguments:
+            return
+        logger.info(
+            f"[Guard] {decision.tool_name}({decision.arguments}) -> "
+            f"{guarded_name}({guarded_args})"
+        )
+        decision.tool_name = guarded_name
+        decision.arguments = guarded_args
 
     def _log_trace(self, result: TurnResult) -> None:
         if not self.metrics_enabled or not result.trace:
