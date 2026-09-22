@@ -1,15 +1,14 @@
 {
  "_": "Что модель делает СЕГОДНЯ. Регресс и починка одинаково видны как git diff. Не править руками.",
  "_как_обновить": "Прогнать полный датасет и пересобрать: см. dev/ROADMAP.md, раздел «Как обновлять baseline».",
- "снято": "2026-09-21 (базовый прогон), 2026-09-22 (перемерены кейсы M2)",
+ "снято": "22.09.2026, полный прогон после M3",
  "модель": "gemini-3.5-flash-lite",
  "датасет": "tests/fixtures/dialog_cases.jsonl",
  "итоги": {
   "ходов": 100,
-  "зелёных": 92,
-  "красных": 8,
+  "зелёных": 99,
   "ошибок": 0,
-  "латентность_p95_мс": 1190.47
+  "латентность_p95_мс": 2280.86
  },
  "маршруты": {
   "standalone_gratitude": [
@@ -162,7 +161,7 @@
    "check_dates_availability"
   ],
   "real_039_publication_time": [
-   "answer_information"
+   "faq_stats"
   ],
   "real_040_ad_formats": [
    "answer_information"
@@ -211,7 +210,7 @@
   ],
   "real_053_paid_vacancy_and_ord": [
    "answer_information",
-   "answer_information"
+   "faq_ord"
   ],
   "real_054_approval_status": [
    "request_publication_support"
@@ -253,13 +252,13 @@
   ],
   "paid_vacancy_funnel_target": [
    "faq_free_posting",
-   "answer_information",
+   "request_paid_vacancy",
    "request_paid_vacancy",
    "request_paid_vacancy"
   ],
   "paid_vacancy_never_books_slot": [
    "faq_free_posting",
-   "answer_information",
+   "request_paid_vacancy",
    "request_paid_vacancy",
    "request_paid_vacancy"
   ],
@@ -278,13 +277,8 @@
   ]
  },
  "красные_кейсы": {
-  "_": "Красные намеренно: фиксируют целевое поведение до его реализации. Оставшиеся зеленеют на M3 (ADR-0004).",
-  "кейсы": [
-   "paid_vacancy_funnel_target",
-   "vacancy_bare_word_two_options",
-   "vacancy_how_to_post_two_options",
-   "vacancy_want_to_post_two_options"
-  ]
+  "_": "Кейсы, которые не зелёные, и почему. Пустой список — норма.",
+  "real_039_publication_time": "«В какое время больше всего охватов?» — на это не отвечает ни FAQ_STATS, ни FAQ_PUBLICATION_TIME: нужной реплики просто не существует. Абляция 22.09.2026 показала, что к M2/M3 отношения не имеет — faq_stats приходит 3/3 и без нового правила промпта. Кандидат в ROADMAP."
  },
- "_оговорка": "Часть кейсов допускает несколько равноправных маршрутов (expected_tools). Такой кейс может менять запись между прогонами, оставаясь зелёным — это не регресс."
+ "_оговорка": "Часть кейсов допускает несколько равноправных маршрутов (expected_tools) и может менять запись между прогонами, оставаясь зелёной. real_050_booking_flow ход 3 — такой случай: get_free_slots и check_dates_availability оба валидны."
 }

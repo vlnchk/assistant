@@ -150,10 +150,17 @@ class OptionsBeforeEscalationTests(unittest.TestCase):
     """Нельзя собирать текст под платный вариант, который не назвали."""
 
     def test_without_options_shown_it_answers_with_options(self):
-        history = [_bot(replies.FAQ_FREE_POSTING), _user("нужно платно")]
+        history = [_bot(replies.GREETING), _user("нужно платно")]
         name, args = apply_product_guard("request_paid_vacancy", {}, history)
         self.assertEqual(name, "answer_information")
         self.assertEqual(args, {"topics": ["vacancy_options"]})
+
+    def test_rule_is_dormant_after_adr_0004(self):
+        """После ADR-0004 опции звучат на первом же вакансионном ответе,
+        поэтому подмена перестаёт срабатывать сама, без отдельного кода."""
+        history = [_bot(replies.FAQ_FREE_POSTING), _user("нужно платно")]
+        name, _ = apply_product_guard("request_paid_vacancy", {}, history)
+        self.assertEqual(name, "request_paid_vacancy")
 
     def test_after_options_shown_escalation_is_allowed(self):
         history = [_bot(replies.FAQ_VACANCY_OPTIONS), _user("давайте платно")]

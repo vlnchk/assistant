@@ -99,11 +99,12 @@ def reply_offtopic() -> str:
 
 def faq_free_posting() -> str:
     """
-    Explain that posting a regular job vacancy is free and point the client
-    to the submission form. Use when the client wants to publish a vacancy
-    via the standard form, or asks only "how do I post a vacancy?". For price,
-    own-format or free-vs-paid questions use answer_information with
-    vacancy_options instead. A course, school, program or project mentioned as
+    Answer any vacancy-placement intent: the reply names BOTH options — the
+    free submission form and the paid custom-format placement (ADR-0004).
+    Use when the client wants to publish a vacancy, or asks "how do I post a
+    vacancy?". It is also correct for price and free-vs-paid questions; the
+    vacancy_options topic of answer_information returns the same text.
+    A course, school, program or project mentioned as
     the employer/product does not change an explicit vacancy into promotion
     (e.g. "vacancy for a course teacher" is still a vacancy). Never use this
     tool for an announcement promoting the program/course itself merely because
@@ -168,7 +169,8 @@ def answer_information(
     comes from bot.replies; never invent or paraphrase an answer.
 
     Allowed topics:
-      - free_posting: standard free vacancy submission form;
+      - free_posting: vacancy placement, both options (same text as
+        vacancy_options);
       - vacancy_options: compare free and paid custom-format vacancy posting
         (from 3 000 ₽, optional direct contacts, image allowed);
       - free_advertising: clarify that ads are paid while vacancies may be free;
