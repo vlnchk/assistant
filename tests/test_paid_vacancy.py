@@ -16,7 +16,7 @@ from llm.tool_executor import (
     apply_product_guard,
     detect_product,
 )
-from llm.tools import TERMINAL_TOOLS, request_paid_vacancy
+from llm.tools import bot_tools, request_paid_vacancy
 
 
 def _bot(text):
@@ -117,7 +117,7 @@ class CalendarGuardTests(unittest.TestCase):
 class RequestPaidVacancyTests(unittest.TestCase):
     def test_registered_everywhere(self):
         self.assertIn("request_paid_vacancy", TOOL_FUNCTIONS)
-        self.assertIn("request_paid_vacancy", TERMINAL_TOOLS)
+        self.assertIn(request_paid_vacancy, bot_tools)
 
     def test_without_text_asks_for_it_and_does_not_escalate(self):
         reply = request_paid_vacancy()

@@ -4,7 +4,8 @@ from pathlib import Path
 
 from bot import replies
 from llm.gemini_client import _build_system_prompt
-from llm.tools import TERMINAL_TOOLS, ask_placement_type, bot_tools
+from llm.tool_executor import TOOL_FUNCTIONS
+from llm.tools import ask_placement_type, bot_tools
 from llm.tool_executor import TOOL_FUNCTIONS
 
 
@@ -55,7 +56,7 @@ class PlacementTypeToolTests(unittest.TestCase):
     def test_tool_is_registered_everywhere(self):
         self.assertIn("ask_placement_type", {tool.__name__ for tool in bot_tools})
         self.assertIn("ask_placement_type", TOOL_FUNCTIONS)
-        self.assertIn("ask_placement_type", TERMINAL_TOOLS)
+        self.assertIn("ask_placement_type", TOOL_FUNCTIONS)
 
     def test_prompt_keeps_the_strict_boundary(self):
         prompt = _build_system_prompt(None)

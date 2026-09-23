@@ -14,58 +14,15 @@ from typing import Any, Callable
 
 from assistant.models import ToolOutcome
 from bot import replies
-from llm.tools import (
-    INFORMATION_REPLIES,
-    answer_information,
-    ask_ad_topic,
-    ask_placement_type,
-    book_slot,
-    check_dates_availability,
-    create_document_task,
-    faq_docs,
-    faq_free_posting,
-    faq_ord,
-    faq_paid_post,
-    faq_stats,
-    get_client_bookings,
-    get_free_slots,
-    handover_to_admin,
-    reply_bot_nature,
-    reply_gratitude,
-    reply_offtopic,
-    request_mutual_pr_support,
-    request_paid_vacancy,
-    request_publication_support,
-    send_greeting,
-)
+from llm.tools import INFORMATION_REPLIES, bot_tools
 from logger import logger
 
 
 ToolFunction = Callable[..., str]
 
-TOOL_FUNCTIONS: dict[str, ToolFunction] = {
-    "send_greeting": send_greeting,
-    "reply_gratitude": reply_gratitude,
-    "reply_bot_nature": reply_bot_nature,
-    "reply_offtopic": reply_offtopic,
-    "faq_free_posting": faq_free_posting,
-    "faq_paid_post": faq_paid_post,
-    "faq_stats": faq_stats,
-    "faq_ord": faq_ord,
-    "faq_docs": faq_docs,
-    "answer_information": answer_information,
-    "ask_placement_type": ask_placement_type,
-    "ask_ad_topic": ask_ad_topic,
-    "get_free_slots": get_free_slots,
-    "check_dates_availability": check_dates_availability,
-    "book_slot": book_slot,
-    "get_client_bookings": get_client_bookings,
-    "create_document_task": create_document_task,
-    "request_publication_support": request_publication_support,
-    "request_mutual_pr_support": request_mutual_pr_support,
-    "request_paid_vacancy": request_paid_vacancy,
-    "handover_to_admin": handover_to_admin,
-}
+# Derived from bot_tools rather than listed by hand: a tool the model can
+# call is always a tool the executor can run.
+TOOL_FUNCTIONS: dict[str, ToolFunction] = {fn.__name__: fn for fn in bot_tools}
 
 
 # ---------------------------------------------------------------------------

@@ -144,8 +144,8 @@ To add an intent:
 
 1. Add the canonical response to `bot/replies.py`.
 2. Add a tool with an English routing docstring to `llm/tools.py`.
-3. Register it in `TERMINAL_TOOLS`, `bot_tools`, and `TOOL_FUNCTIONS` in
-   `llm/tool_executor.py`.
+3. Add it to the `bot_tools` list — the only registry. `TOOL_FUNCTIONS` in
+   `llm/tool_executor.py` is derived from it automatically.
 4. Update the system prompt in `llm/gemini_client.py` if the routing rule needs
    explicit clarification.
 5. Add unit tests and at least one JSONL eval case.

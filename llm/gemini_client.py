@@ -8,19 +8,14 @@ import asyncio
 import datetime
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 from google import genai
 from google.genai import types
 
 from assistant.models import ModelUsage, RouteDecision
 from llm.tools import bot_tools
-from llm.tool_executor import (
-    ProductionToolExecutor,
-    TOOL_FUNCTIONS,
-    ToolCallError,
-    inject_server_context,
-)
+from llm.tool_executor import TOOL_FUNCTIONS
 from logger import logger
 
 
@@ -286,7 +281,6 @@ class GeminiClient:
         # from secrets. Real model calls still fail clearly without an API key.
         self.client = genai.Client(api_key=API_KEY) if API_KEY else None
         self.model_name = MODEL_NAME
-        self.executor = ProductionToolExecutor()
 
     def _config(
         self,
@@ -370,35 +364,6 @@ class GeminiClient:
                 metadata, "total_token_count", "totalTokenCount"
             ),
         )
-
-    def _inject_server_context(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        user_context: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Backward-compatible facade for tests and external callers."""
-        return inject_server_context(tool_name, args, user_context)
-
-    def _inject_real_telegram_id(
-        self,
-        args: dict[str, Any],
-        user_context: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Backward-compatible helper retained for older callers."""
-        if "telegram_id" not in args:
-            return args
-        return inject_server_context("get_client_bookings", args, user_context)
-
-    async def _call_tool(self, name: str, args: dict[str, Any]) -> str:
-        """Backward-compatible raw tool execution helper."""
-        fn = TOOL_FUNCTIONS.get(name)
-        if not fn:
-            raise ToolCallError(f"инструмент '{name}' не найден")
-        try:
-            return await asyncio.to_thread(fn, **args)
-        except TypeError as exc:
-            raise ToolCallError(f"{name}: неверные аргументы") from exc
 
     async def route(
         self,
@@ -485,50 +450,6 @@ class GeminiClient:
             arguments=arguments,
             latency_ms=latency_ms,
             usage=usage,
-        )
-
-    async def generate_response(
-        self,
-        history_messages: list[dict[str, Any]],
-        new_message: str,
-        user_context: dict[str, Any] | None = None,
-        _timeout_retry: bool = False,
-    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Backward-compatible one-model route-and-execute method."""
-        del _timeout_retry
-        decision = await self.route(
-            history_messages,
-            new_message,
-            user_context,
-            model_name=self.model_name,
-            timeout_s=GEMINI_TIMEOUT,
-        )
-        if decision.error:
-            reason = (
-                "LLM timeout"
-                if decision.error == "timeout"
-                else f"LLM routing error ({decision.error})"
-            )
-            return None, reason, None
-
-        try:
-            prepared = self.executor.prepare(
-                decision.tool_name or "",
-                decision.arguments,
-                user_context,
-            )
-            outcome = await self.executor.execute_prepared(
-                decision.tool_name or "",
-                prepared,
-            )
-        except ToolCallError as exc:
-            logger.error(f"[Tool] {exc} — уходим в handover")
-            return None, f"внутренняя ошибка инструмента ({exc})", None
-
-        return (
-            outcome.reply_text,
-            outcome.handover_reason,
-            outcome.admin_notification,
         )
 
 

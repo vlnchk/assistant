@@ -543,35 +543,12 @@ def handover_to_admin(reason: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Registry — order matters for the system prompt readability
+# Registry — the ONLY place a tool is registered
 # ---------------------------------------------------------------------------
 
-# Tools that produce a final client-facing reply. The dispatcher loop in
-# gemini_client exits as soon as one of these returns — no extra LLM
-# round-trip is needed because the text is already canonical.
-TERMINAL_TOOLS = {
-    "send_greeting",
-    "reply_gratitude",
-    "reply_bot_nature",
-    "reply_offtopic",
-    "faq_free_posting",
-    "faq_paid_post",
-    "faq_stats",
-    "faq_ord",
-    "faq_docs",
-    "answer_information",
-    "ask_placement_type",
-    "ask_ad_topic",
-    "book_slot",
-    "get_free_slots",
-    "check_dates_availability",
-    "get_client_bookings",
-    "create_document_task",
-    "request_publication_support",
-    "request_mutual_pr_support",
-    "request_paid_vacancy",
-}
-
+# The model sees exactly this list, and the executor's TOOL_FUNCTIONS is
+# derived from it, so the two cannot drift apart. Order matters only for
+# readability of the model-facing tool list.
 bot_tools = [
     send_greeting,
     reply_gratitude,

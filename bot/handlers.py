@@ -637,7 +637,7 @@ async def user_private_message(message: Message, bot: Bot):
             if not reply_text:
                 # Should never happen, but fail safe.
                 reply_text = replies.TECH_ERROR
-                logger.error("[LLM] generate_response вернул пустой reply без handover")
+                logger.error("[LLM] движок вернул пустой reply без handover")
 
             session.add(
                 MessageHistory(
