@@ -40,7 +40,13 @@ class AdminTopic(Base):
 
     topic_id: Mapped[int] = mapped_column(Integer, primary_key=True) # message_thread_id
     telegram_id: Mapped[int] = mapped_column(ForeignKey("representatives.telegram_id"), unique=True)
-    status: Mapped[str] = mapped_column(String, default="active") # active, waiting_human, closed
+    status: Mapped[str] = mapped_column(String, default="active") # active, waiting_human, human_mode
+    # Когда диалог последний раз ушёл менеджеру. По нему бот понимает, что
+    # ожидание просрочено и пора напомнить (ADR-0009). NULL — строки старше
+    # колонки; они считаются просроченными.
+    escalated_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     
     representative: Mapped["Representative"] = relationship("Representative", back_populates="admin_topic")
 

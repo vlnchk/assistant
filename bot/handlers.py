@@ -11,6 +11,12 @@ from aiogram.types import Message
 from sqlalchemy.future import select
 
 from assistant.engine import assistant_engine
+from assistant.session import (
+    MANAGER_REMINDER_AFTER,
+    current_session,
+    reminder_due,
+    utc_now,
+)
 from assistant.models import TurnRequest
 from bot import replies
 from db.database import async_session_maker
@@ -354,6 +360,45 @@ async def _notify_document_task(
     await _send_to_service_topic(bot, notif_text, "Документы")
 
 
+async def _answer_while_waiting(
+    bot: Bot,
+    message: Message,
+    session,
+    rep: Representative,
+    admin_topic: AdminTopic,
+) -> None:
+    """Client writes while a manager is expected (ADR-0009).
+
+    Within the promised window the reply stays the same. Past it, managers get
+    a repeat alert and the client an honest one. The bot does not take the
+    dialogue back: a manager who is just starting to answer would be talked
+    over. Repeated at most once per window, and only when the client writes.
+    """
+    now = utc_now()
+    if not reminder_due(admin_topic.escalated_at, now):
+        await message.answer(replies.WAITING_HUMAN)
+        await _mirror_to_topic(bot, admin_topic, replies.ADMIN_BOT_WAITING)
+        return
+
+    admin_topic.escalated_at = now
+    await session.commit()
+    await message.answer(replies.WAITING_HUMAN_REMINDED)
+    await _mirror_to_topic(
+        bot,
+        admin_topic,
+        replies.ADMIN_BOT_REPLY.format(
+            text=html.escape(replies.WAITING_HUMAN_REMINDED)
+        ),
+    )
+    hours = int(MANAGER_REMINDER_AFTER.total_seconds() // 3600)
+    await _notify_escalation(
+        bot,
+        rep,
+        f"повторно: клиент ждёт ответа дольше {hours} ч",
+        admin_topic,
+    )
+
+
 @router.message(CommandStart(), F.chat.type == "private")
 async def handle_start_command(message: Message, bot: Bot):
     if is_rate_limited(message.from_user.id):
@@ -481,9 +526,7 @@ async def user_private_message(message: Message, bot: Bot):
                 return
 
             if status == "waiting_human":
-                # Эскалация уже была — напоминаем клиенту, без повторного алерта.
-                await message.answer(replies.WAITING_HUMAN)
-                await _mirror_to_topic(bot, admin_topic, replies.ADMIN_BOT_WAITING)
+                await _answer_while_waiting(bot, message, session, rep, admin_topic)
                 return
 
             # active (или тема ещё не создана) — подтверждаем и эскалируем.
@@ -496,6 +539,7 @@ async def user_private_message(message: Message, bot: Bot):
             )
             if admin_topic:
                 admin_topic.status = "waiting_human"
+                admin_topic.escalated_at = utc_now()
             await session.commit()
 
             await _mirror_to_topic(
@@ -537,8 +581,7 @@ async def user_private_message(message: Message, bot: Bot):
             select(AdminTopic).where(AdminTopic.telegram_id == rep.telegram_id)
         )
         if admin_topic and admin_topic.status == "waiting_human":
-            await message.answer(replies.WAITING_HUMAN)
-            await _mirror_to_topic(bot, admin_topic, replies.ADMIN_BOT_WAITING)
+            await _answer_while_waiting(bot, message, session, rep, admin_topic)
             return
 
         if admin_topic and admin_topic.status == "human_mode":
@@ -555,7 +598,13 @@ async def user_private_message(message: Message, bot: Bot):
                 .order_by(MessageHistory.id.desc())
                 .limit(39)
             )
-            history_records = list(reversed(history_query.scalars().all()))
+            # Только текущая сессия (ADR-0008): после паузы дольше SESSION_GAP
+            # клиент начинает с чистого листа, и старый продукт не управляет
+            # новым вопросом.
+            history_records = current_session(
+                list(reversed(history_query.scalars().all())),
+                utc_now(),
+            )
             conversation_history = [
                 {"role": record.role, "content": record.content}
                 for record in history_records
@@ -614,6 +663,7 @@ async def user_private_message(message: Message, bot: Bot):
                 final_reply = reply_text or replies.HANDOVER_CLIENT
                 if admin_topic:
                     admin_topic.status = "waiting_human"
+                    admin_topic.escalated_at = utc_now()
 
                 session.add(
                     MessageHistory(
