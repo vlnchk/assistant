@@ -319,6 +319,35 @@ class ProductionPathTests(unittest.IsolatedAsyncioTestCase):
         sheets.get_free_slots.assert_not_called()
 
 
+
+class NoPricesInRoutingMetadataTests(unittest.TestCase):
+    """Цены живут только в bot/replies.py.
+
+    Docstring'и инструментов и системный промпт — подсказки модели, какой
+    инструмент вызвать. Клиент их не видит, а цена в них — вторая копия,
+    которая при смене цены остаётся старой. Так случилось с ОРД 24.09.2026:
+    в тексте клиенту поменяли, в docstring'е faq_ord осталось 2 000 ₽.
+    """
+
+    AMOUNT = __import__("re").compile(r"\d[\d\s\u00a0]*(₽|руб)")
+
+    def test_tool_docstrings_carry_no_prices(self):
+        from llm.tools import bot_tools
+
+        for fn in bot_tools:
+            with self.subTest(tool=fn.__name__):
+                self.assertIsNone(self.AMOUNT.search(fn.__doc__ or ""))
+
+    def test_system_prompt_carries_no_prices(self):
+        from llm.gemini_client import SYSTEM_PROMPT_TEMPLATE
+
+        self.assertIsNone(self.AMOUNT.search(SYSTEM_PROMPT_TEMPLATE))
+
+    def test_client_replies_still_have_prices(self):
+        """Контроль, что регулярка вообще ловит цены, а не пропускает всё."""
+        self.assertIsNotNone(self.AMOUNT.search(replies.FAQ_PAID_POST))
+        self.assertIsNotNone(self.AMOUNT.search(replies.FAQ_ORD))
+
 if __name__ == "__main__":
     unittest.main()
 

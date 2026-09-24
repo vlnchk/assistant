@@ -115,8 +115,8 @@ def faq_free_posting() -> str:
 
 def faq_paid_post() -> str:
     """
-    Explain pricing for paid promotional posts (15 000 ₽ per post, 5th post
-    free when 4 are paid at once, 24h top placement). Use when the client
+    Explain pricing and terms for paid promotional posts: the per-post price,
+    the bulk «4+1» offer and how long a post stays on top. Use when the client
     asks about ad pricing or wants to buy promotion in the channel. For a
     vacancy where the client compares free and custom-format placement, use
     answer_information with vacancy_options. Announcements about programs,
@@ -172,7 +172,7 @@ def answer_information(
       - free_posting: vacancy placement, both options (same text as
         vacancy_options);
       - vacancy_options: compare free and paid custom-format vacancy posting
-        (from 3 000 ₽, optional direct contacts, image allowed);
+        (optional direct contacts, image allowed);
       - free_advertising: clarify that ads are paid while vacancies may be free;
       - paid_post: non-vacancy advertising price, 4+1 offer and 24-hour top;
       - ad_formats: text/photo/video/native format, pinning and editing;
@@ -490,8 +490,7 @@ def request_paid_vacancy(vacancy_text: str = "") -> str:
     advertising only. Never call get_free_slots, check_dates_availability,
     book_slot or ask_ad_topic for a vacancy, even if the client names a date.
 
-    Never quote a final price: "от 3 000 ₽" is the only figure the bot says,
-    the manager confirms the rest.
+    The final price is confirmed by the manager, never by the bot.
 
     Args:
         vacancy_text: The vacancy text if the client has already sent it.
