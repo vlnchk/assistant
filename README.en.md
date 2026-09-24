@@ -81,9 +81,13 @@ Technical commands and uncaptioned media are handled by the transport adapter
         ↓
 If the topic is waiting_human or human_mode, LLM routing does not run
         ↓
+History is trimmed to the current session: a pause over 3 days starts fresh
+        ↓
 assistant/engine.py receives a provider-neutral TurnRequest
         ↓
 Gemini 3.5 Flash-Lite selects exactly one business tool
+        ↓
+Product guard: in a vacancy dialogue the advertising calendar is unavailable
         ↓
 llm/tool_executor.py validates and executes the tool once
         ↓
@@ -101,11 +105,18 @@ supergroup.
 | State | Behaviour |
 |---|---|
 | `active` | The bot responds automatically. |
-| `waiting_human` | A manager has been requested; the bot tells the client that a manager is on the way. |
+| `waiting_human` | A manager has been requested; the bot tells the client that a manager is on the way. After 4 hours without a reply, a client message triggers a repeat alert to managers. |
 | `human_mode` | Only the manager responds; the bot stays silent. |
 
 When a manager replies in the topic, the message is delivered to the client and
 the topic enters `human_mode`. The `/close` command returns it to `active`.
+
+Waiting is not indefinite. If more than 4 hours have passed since escalation
+and the client writes again, managers get a repeat alert and the client is told
+the manager has been reminded. The bot stays in `waiting_human` rather than
+taking the dialogue back, so it never talks over a manager who has just started
+replying. The escalation time is stored in `admin_topics.escalated_at`
+(ADR-0009).
 
 ### Gemini tools
 
@@ -118,27 +129,29 @@ metadata; client-facing Russian text lives in `bot/replies.py`.
 | `reply_gratitude` | Standalone gratitude |
 | `reply_bot_nature` | Questions about whether the assistant is a bot |
 | `reply_offtopic` | Polite handling of unrelated conversation |
-| `faq_free_posting` | Free vacancy placement form |
+| `faq_free_posting` | Vacancy placement: both options — the free form and paid placement |
 | `faq_paid_post` | Paid advertising terms |
 | `faq_stats` | Reach, ERR, and audience geography |
 | `faq_ord` | Advertising labelling and ORD |
 | `faq_docs` | Contracts, invoices, EDI, and document workflow |
 | `answer_information` | One or more canonical FAQ blocks, optionally including read-only calendar data |
 | `ask_placement_type` | Clarify "vacancy or promotional post?" on a general question about terms |
-| `ask_ad_topic` | Request the subject of an advertisement |
-| `get_free_slots` | Read available dates from Google Sheets |
+| `ask_ad_topic` | Request the subject of an advertisement — advertising only |
+| `get_free_slots` | Read available dates from Google Sheets — advertising only |
 | `check_dates_availability` | Check one or more requested dates |
 | `book_slot` | Book a slot after validating date and advertising topic |
 | `get_client_bookings` | Return bookings for the authenticated Telegram user only |
 | `create_document_task` | Create an invoice/contract/act task and notify a manager |
 | `request_publication_support` | Status, edit, delete, expedite, and related publication operations |
 | `request_mutual_pr_support` | Hand mutual-promotion proposals to a manager |
+| `request_paid_vacancy` | Paid vacancy: ask for the vacancy text and hand it to a manager. Never books a slot |
 | `handover_to_admin` | Pause automation and request a human manager |
 
 ### Changing replies or adding an intent
 
 To change approved client wording, edit the relevant constant in
-`bot/replies.py`.
+`bot/replies.py`. Prices live **only** there: tool docstrings and the system
+prompt deliberately carry none, and a test enforces it.
 
 To add an intent:
 
