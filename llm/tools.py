@@ -139,8 +139,8 @@ def faq_stats() -> str:
 
 def faq_ord() -> str:
     """
-    Explain advertising marking (ОРД / маркировка рекламы): client can do
-    it themselves for free, or we do it turnkey for 2 000 ₽. Use when the
+    Explain advertising marking (ОРД / маркировка рекламы): the client can
+    do it themselves for free, or we do it turnkey for a fee. Use when the
     client asks about ad labelling, ОРД, ЕРИР, or marking requirements.
     """
     return replies.FAQ_ORD
