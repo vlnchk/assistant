@@ -25,6 +25,7 @@
 | [2026-09-17-paid-vacancy-funnel](2026-09-17-paid-vacancy-funnel.md) | «Давайте платно» про вакансию утягивает в рекламный календарь | закрыто в `3edc86d` |
 | [2026-09-17-vacancy-hides-paid-option](2026-09-17-vacancy-hides-paid-option.md) | На слово «вакансия» бот называет только бесплатный вариант | закрыто в `6db90ef` |
 | [2026-08-28-promo-recognized-as-vacancy](2026-08-28-promo-recognized-as-vacancy.md) | Промо-пост ушёл как бесплатная вакансия | закрыто в `7aa42aa` |
+| [2026-09-24-offsite-backup-rate-limit](2026-09-24-offsite-backup-rate-limit.md) | Выгрузка бэкапа в Drive падает на общем лимите rclone; cv_bot в такие ночи без бэкапа | воспроизведено |
 
 ## Датасеты воспроизведения
 

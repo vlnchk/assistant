@@ -290,20 +290,46 @@ sudo systemctl show edujobs-bot-backup.service \
 Ожидается `Result=success` и `ExecMainStatus=0`. Скрипт `update.sh` сам
 бэкап не создаёт, поэтому пропускать этот шаг нельзя.
 
+Если выгрузка в Google Drive упала (`Result=exit-code`, в журнале `rclone` и
+`403 rateLimitExceeded`), локальный архив при этом обычно создан и проверен —
+выгрузка идёт последним шагом. Проверить его можно рецептом из раздела
+«Бэкапы и восстановление»; решение деплоить на локальной копии — за
+владельцем. Причина и лечение — `dev/findings/2026-09-24-offsite-backup-rate-limit.md`.
+
 ### Шаг 1. Запушить изменения
 
+Работа ведётся в `dev`, прод собирается из `main`. `main` должен быть предком
+`dev` — тогда пуш является перемоткой вперёд, без `--force`:
+
 ```bash
-git add .
-git commit -m "Опишите изменения"
-git push origin main
+git fetch origin
+git merge-base --is-ancestor origin/main dev && git push origin dev dev:main
 ```
 
 ### Шаг 2. Запустить обновление на сервере
 
+Сначала закрепить текущий образ отдельным тегом: `update.sh` заканчивается
+`docker image prune -f`, и без тега старый образ будет удалён — а он самый
+быстрый путь отката.
+
 ```bash
 cd /opt/assistant
+docker tag "$(docker inspect edujobs_bot --format '{{.Image}}')" \
+  "assistant-bot:rollback-$(git rev-parse --short HEAD)"
 ./update.sh
 ```
+
+Откат без пересборки (на проде пока не проверялся):
+
+```bash
+docker tag assistant-bot:rollback-<коммит> assistant-bot:latest
+docker compose up -d --force-recreate
+```
+
+Код в `/opt/assistant` при этом остаётся новым, и следующий `update.sh`
+соберёт его снова — поэтому после отката сначала исправить проблему в `dev`.
+Миграции, которые только добавляют колонки, откат образа не ломает: старый
+код их не замечает.
 
 > Скрипт `update.sh` лежит только на VPS. Он делает `git pull`, пересобирает
 > образ, перезапускает контейнер и удаляет dangling-образы. Запускать его нужно
