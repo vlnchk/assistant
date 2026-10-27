@@ -31,7 +31,7 @@ class BothOptionsAlwaysNamedTests(unittest.TestCase):
         self.assertLess(reply.index("бесплатно"), reply.index("платно — от"))
 
     def test_form_link_survived(self):
-        self.assertIn("clck.ru/3Qxfvq", faq_free_posting())
+        self.assertIn("forms.gle/5faZszM99h8dUdkv5", faq_free_posting())
 
     def test_no_duplicate_block_when_both_topics_requested(self):
         """Обе темы в одном вызове не должны печатать текст дважды."""
