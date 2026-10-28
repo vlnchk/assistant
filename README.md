@@ -1,6 +1,6 @@
 # EduJobs Assistant Bot
 
-[Русский](README.md) | **English**
+[Русский](README.ru.md) | **English**
 
 A Telegram assistant for an education jobs channel. It answers questions about
 vacancy and advertising placement, helps clients check and book advertising
