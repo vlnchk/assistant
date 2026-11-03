@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/vlnchk/assistant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vlnchk/assistant/actions/workflows/ci.yml)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
-![License: proprietary](https://img.shields.io/badge/license-proprietary-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 **English** | [Русский](README.ru.md)
 
@@ -384,4 +384,4 @@ I designed the product, wrote the requirements, made every business decision and
 
 ## License
 
-© 2026 Stepan Vilenchik. All rights reserved. The source code is published for review only. It may not be copied, modified or used without written permission. See [LICENSE](LICENSE).
+[MIT](LICENSE) © 2026 Stepan Vilenchik.
