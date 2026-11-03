@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/vlnchk/assistant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vlnchk/assistant/actions/workflows/ci.yml)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
-![License: proprietary](https://img.shields.io/badge/license-proprietary-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 [English](README.md) | **Русский**
 
@@ -346,4 +346,4 @@ python scripts/eval_assistant.py --interactive
 
 ## Лицензия
 
-© 2026 Степан Виленчик. Все права защищены. Исходный код опубликован только для ознакомления. Копирование, изменение и использование без письменного разрешения запрещены. См. [LICENSE](LICENSE).
+[MIT](LICENSE) © 2026 Степан Виленчик.
